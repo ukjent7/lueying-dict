@@ -90,6 +90,7 @@ def main() -> int:
     parser.add_argument("dict")
     parser.add_argument("--max-chars", type=int, default=200_000_000)
     parser.add_argument("--limits", default="180000,500000")
+    parser.add_argument("--clips", default="3", help="PMI 上限，逗号分隔")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
@@ -107,19 +108,20 @@ def main() -> int:
     streams = [ultra(), lccc()]
     seen = i = 0
     batch: list[str] = []
-    try:
-        while seen < args.max_chars:
-            text = next(streams[i % 2])
-            i += 1
-            for run in HANZI_RUN.findall(text[:MAX_DOC]):
-                if len(run) >= 2:
-                    batch.append(run)
-                    seen += len(run)
-            if len(batch) >= BATCH:
-                queue.put(batch)
-                batch = []
-    except StopIteration:
-        pass
+    while seen < args.max_chars and streams:
+        stream = streams[i % len(streams)]
+        i += 1
+        text = next(stream, None)
+        if text is None:
+            streams.remove(stream)
+            continue
+        for run in HANZI_RUN.findall(text[:MAX_DOC]):
+            if len(run) >= 2:
+                batch.append(run)
+                seen += len(run)
+        if len(batch) >= BATCH:
+            queue.put(batch)
+            batch = []
     queue.put(batch)
     for _ in procs:
         queue.put(None)
@@ -141,19 +143,21 @@ def main() -> int:
         os.remove(path)
     print(f"[count] tokens={tokens} pairs={len(pairs)}", flush=True)
 
-    scored = []
-    for key, count in pairs.items():
-        if count < MIN_COUNT:
-            continue
-        left, right = key.split("\0")
-        c_right = total / 10 if right == END else uni.get(right, count)
-        pmi = math.log2((count / total) / max(uni.get(left, count) / tokens * c_right / tokens, 1e-12))
-        score = max(-3.0, min(3.0, pmi * count / (count + 5.0)))
-        if score > 0:
-            scored.append((count * max(0.1, score), score, key))
-    scored.sort(reverse=True)
-    for limit in (int(x) for x in args.limits.split(",")):
-        export(scored, limit, f"{args.out}/collocation-{limit // 1000}k.bin")
+    for clip in (float(x) for x in args.clips.split(",")):
+        scored = []
+        for key, count in pairs.items():
+            if count < MIN_COUNT:
+                continue
+            left, right = key.split("\0")
+            c_right = total / 10 if right == END else uni.get(right, count)
+            pmi = math.log2((count / total) / max(uni.get(left, count) / tokens * c_right / tokens, 1e-12))
+            score = min(clip, pmi * count / (count + 5.0))
+            if score > 0:
+                scored.append((count * max(0.1, score), score, key))
+        scored.sort(reverse=True)
+        print(f"[score] clip={clip} kept={len(scored)} at_cap={sum(1 for s in scored if s[1] >= clip)}", flush=True)
+        for limit in (int(x) for x in args.limits.split(",")):
+            export(scored, limit, f"{args.out}/collocation-{limit // 1000}k-c{clip:g}.bin")
     return 0
 
 

@@ -115,11 +115,15 @@ def fineweb2(since: str = "2021"):
 def lccc():
     url = "https://huggingface.co/datasets/silver/lccc/resolve/main/lccc_base_train.jsonl.gz"
     req = urllib.request.Request(url, headers={"User-Agent": "lueying-dict"})
-    with urllib.request.urlopen(req, timeout=120) as resp:
-        for raw in io.TextIOWrapper(gzip.GzipFile(fileobj=resp), encoding="utf-8"):
-            row = json.loads(raw)
-            dialog = row if isinstance(row, list) else row["dialog"]
-            yield "，".join(s.replace(" ", "") for s in dialog)
+    # 远端连接可能中途断开；读到多少算多少，调用方换别的来源继续。
+    try:
+        with urllib.request.urlopen(req, timeout=120) as resp:
+            for raw in io.TextIOWrapper(gzip.GzipFile(fileobj=resp), encoding="utf-8"):
+                row = json.loads(raw)
+                dialog = row if isinstance(row, list) else row["dialog"]
+                yield "，".join(s.replace(" ", "") for s in dialog)
+    except (EOFError, OSError) as exc:
+        print(f"[warn] lccc stopped: {exc}", flush=True)
 
 
 def fetch(url: str):

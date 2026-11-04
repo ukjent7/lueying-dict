@@ -51,10 +51,12 @@ def mixed(limit_chars: int):
     seen = 0
     i = 0
     while seen < limit_chars and streams:
-        text = next(streams[pattern[i % len(pattern)]], None)
+        stream = streams[pattern[i % len(pattern)] % len(streams)]
         i += 1
+        text = next(stream, None)
         if text is None:
-            break
+            streams.remove(stream)
+            continue
         for run in HANZI_RUN.findall(text[:MAX_DOC]):
             if 4 <= len(run) <= MAX_RUN:
                 seen += len(run)
