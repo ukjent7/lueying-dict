@@ -29,7 +29,7 @@ from collections import Counter, defaultdict
 
 from legal_syllables import LEGAL_SYLLABLES
 
-MAGIC = b"PYD1\x00\x00\x00\x01"
+MAGIC = b"PYD2\x00\x00\x00\x01"
 HANZI = re.compile(r"^[一-鿿]+$")
 MAX_LEN = 10
 # 与引擎 WORD_PENALTY 同义：路径每多一个词的对数代价。
@@ -39,6 +39,8 @@ REDUNDANT = 0.005
 TRUSTED = 4.0
 MIN_SHARE = 0.08
 MIN_OBSERVED = 4
+AMBIGUOUS = 0.97
+NEED_LIMIT = 300_000
 # 单字读音占比下限：规范字表收录的读音即使语料罕见也要能打出来。
 CHAR_FLOOR = 0.002
 COMBINING_V = {"ǖ": "v", "ǘ": "v", "ǚ": "v", "ǜ": "v", "ü": "v"}
@@ -270,27 +272,26 @@ def necessity(entries: dict[str, list[tuple[str, float]]], p: dict[str, float]) 
 
 
 def pack_pyd(entries: list[tuple[str, str, int]], path: str) -> None:
+    """PYD2：记录 14 字节，相邻同键共用字符串，签名表只存下标（与 crates/dict 同构）。"""
     data = bytearray()
     recs = bytearray()
-    sigs: list[tuple[bytes, int, int, int]] = []
-    for i, (word, key, freq) in enumerate(entries):
+    last_key, key_off = None, 0
+    for word, key, freq in entries:
         wb, kb = word.encode(), key.encode()
-        wo = len(data)
+        word_off = len(data)
         data += wb
-        ko = len(data)
-        data += kb
-        recs += struct.pack("<IIIIQ", wo, len(wb), ko, len(kb), freq)
-        sig = "".join(s[0] for s in key.split("'")).encode()
-        so = len(data)
-        data += sig
-        sigs.append((sig, so, len(sig), i))
-    sigs.sort(key=lambda item: (item[0], item[3]))
+        if key != last_key:
+            key_off = len(data)
+            data += kb
+            last_key = key
+        recs += struct.pack("<IIIBB", word_off, key_off, min(freq, 0xFFFFFFFF), len(wb), len(kb))
+    order = sorted(range(len(entries)),
+                   key=lambda i: ("".join(s[0] for s in entries[i][1].split("'")), i))
     with open(path, "wb") as f:
-        f.write(MAGIC + struct.pack("<III", len(entries), len(data), len(sigs)))
+        f.write(MAGIC + struct.pack("<II", len(entries), len(data)))
         f.write(recs)
         f.write(data)
-        for _, so, sl, i in sigs:
-            f.write(struct.pack("<III", so, sl, i))
+        f.write(struct.pack(f"<{len(order)}I", *order))
 
 
 def main() -> int:
@@ -305,6 +306,7 @@ def main() -> int:
     parser.add_argument("--sizes", default="200000,400000,600000,800000", help="多字词条档位")
     parser.add_argument("--min-count", type=int, default=3)
     parser.add_argument("--min-df", type=int, default=2)
+    parser.add_argument("--need", default="", help="导出待注音词表后退出")
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -328,6 +330,22 @@ def main() -> int:
         sources.append(load_tubelex(args.tubelex, args.tubelex_weight))
     lex = Lexicon(sources, args.min_count, args.min_df)
     p = lex.p
+
+    if args.need:
+        # 实际读音已经一边倒的字（的、在、是）不算多音，别把 GPU 花在它们身上。
+        def ambiguous(ch: str, opts: list[str]) -> bool:
+            seen = char_seen.get(ch)
+            total = sum(seen.values()) if seen else 0
+            return len(opts) > 1 and (total < 50 or max(seen.values()) / total < AMBIGUOUS)
+
+        poly = {ch for ch, opts in {**pinyin_data, **official}.items() if ambiguous(ch, opts)}
+        words = [w for w in lex.supported if 2 <= len(w) <= 6 and HANZI.match(w)
+                 and w not in phrases and any(ch in poly for ch in w)]
+        words.sort(key=lambda w: -p[w])
+        with open(args.need, "w", encoding="utf-8") as f:
+            f.write("\n".join(words[:NEED_LIMIT]))
+        print(f"[need] {min(len(words), NEED_LIMIT)}/{len(words)} {words[:12]}", flush=True)
+        return 0
 
     # 单字：规范字表全收；读音占比取语料观测，未观测的规范读音保留下限。
     primary: dict[str, str] = {}

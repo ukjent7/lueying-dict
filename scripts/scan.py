@@ -17,17 +17,25 @@ import json
 import multiprocessing as mp
 import os
 import pickle
+import random
 import re
 import time
 import urllib.request
 
 ONE = 1 << 32
-LIMIT = 7_000_000
+LIMIT = 4_500_000
 MAX_DOC = 4000
 BATCH = 64
 MAX_WORD = 6
 HANZI_RUN = re.compile(r"[一-鿿]+")
 # 只有出现这些高频繁体字才走较慢的繁简转换。
+HANZI_CHAR = re.compile(r"[\u4e00-\u9fff]")
+SENTENCE_END = re.compile(r"[，。！？；]")
+WARC_HOST = re.compile(rb"WARC-Target-URI: https?://(?:www\.)?([^/\s:]+)")
+# 采样站点里占比最大的两类垃圾：博彩和色情，词频会被它们的固定话术污染。
+SPAM = re.compile("博彩|彩票|百家乐|时时彩|澳门|娱乐城|棋牌|赌场|开户|av|AV|成人|裸聊|一夜情|人妻|无码|三级片|代孕|发票|私服|外围")
+SITE_CAP = 30
+SEEN_LINES: set[int] = set()
 TRAD = re.compile("[這們個為來時國會對於說過還學發經應樣開從點當間現長見關與頭將實體問話給後裡讓]")
 
 
@@ -114,7 +122,69 @@ def lccc():
             yield "，".join(s.replace(" ", "") for s in dialog)
 
 
-SOURCES = {"ultra": ultra, "fineweb2": fineweb2, "lccc": lccc}
+def fetch(url: str):
+    req = urllib.request.Request(url, headers={"User-Agent": "lueying-dict"})
+    return urllib.request.urlopen(req, timeout=120)
+
+
+def clean_page(body: str) -> str:
+    """行级清洗：留下成句的中文，导航、标题列表和重复模板行都不是语言样本。"""
+    kept = []
+    for line in body.split("\n"):
+        han = len(HANZI_CHAR.findall(line))
+        if han < 12 or han / len(line) < 0.5 or not SENTENCE_END.search(line):
+            continue
+        digest = hash(line)
+        if digest in SEEN_LINES:
+            continue
+        SEEN_LINES.add(digest)
+        kept.append(line)
+    if len(SEEN_LINES) > 8_000_000:
+        SEEN_LINES.clear()
+    return "\n".join(kept)
+
+
+def commoncrawl(seed: int = 0, per_crawl: int = 400):
+    """2025–2026 快照的 WET 文本。其余语料都停在 2023 年前后，这里是新词的来源。
+
+    每站限额让词频反映「多少站在用」，单站刷词进不了词典；只取统计量，不留原文。
+    """
+    crawls = [c["id"] for c in json.load(fetch("https://index.commoncrawl.org/collinfo.json"))
+              if c["id"] >= "CC-MAIN-2025"]
+    rng = random.Random(seed)
+    files = []
+    for crawl in crawls:
+        with fetch(f"https://data.commoncrawl.org/crawl-data/{crawl}/wet.paths.gz") as resp:
+            paths = gzip.decompress(resp.read()).decode().split()
+        files += rng.sample(paths, per_crawl)
+    rng.shuffle(files)
+    print(f"[cc] crawls={len(crawls)} files={len(files)}", flush=True)
+    sites: dict[str, int] = {}
+    for path in files:
+        try:
+            with fetch("https://data.commoncrawl.org/" + path) as resp:
+                records = gzip.GzipFile(fileobj=resp).read().split(b"WARC/1.0\r\n")
+        except Exception as exc:  # noqa: BLE001 - 单个分片失败不影响抽样
+            print(f"[warn] {path}: {exc}", flush=True)
+            continue
+        for record in records:
+            head, _, body = record.partition(b"\r\n\r\n")
+            match = WARC_HOST.search(head)
+            if not match or len(body) < 600:
+                continue
+            text = body.decode("utf-8", "ignore")
+            if len(HANZI_CHAR.findall(text[:2000])) < 200:
+                continue
+            host = match.group(1).decode("ascii", "ignore")
+            if sites.get(host, 0) >= SITE_CAP or SPAM.search(text):
+                continue
+            page = clean_page(text)
+            if len(page) >= 200:
+                sites[host] = sites.get(host, 0) + 1
+                yield page
+
+
+SOURCES = {"ultra": ultra, "fineweb2": fineweb2, "lccc": lccc, "commoncrawl": commoncrawl}
 
 
 def merge(paths: list[str], out: str) -> None:
@@ -141,6 +211,7 @@ def main() -> None:
     parser.add_argument("--source", choices=SOURCES, required=True)
     parser.add_argument("--max-chars", type=int, default=500_000_000)
     parser.add_argument("--workers", type=int, default=2)
+    parser.add_argument("--seed", type=int, default=0, help="commoncrawl 抽样种子")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
 
@@ -155,7 +226,8 @@ def main() -> None:
     batch: list[str] = []
     started = time.time()
     try:
-        for text in SOURCES[args.source]():
+        stream = commoncrawl(args.seed) if args.source == "commoncrawl" else SOURCES[args.source]()
+        for text in stream:
             text = text[:MAX_DOC]
             cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
             if cjk < (4 if args.source == "lccc" else 20):
@@ -166,7 +238,7 @@ def main() -> None:
             if len(batch) >= BATCH:
                 queue.put(batch)
                 batch = []
-            if docs % 20000 == 0:
+            if docs % 5000 == 0:
                 print(f"[scan] {args.source} docs={docs} chars={sent/1e6:.0f}M {time.time()-started:.0f}s", flush=True)
             if sent >= args.max_chars:
                 break
