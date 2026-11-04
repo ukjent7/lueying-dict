@@ -18,7 +18,7 @@ import os
 import pickle
 import re
 import time
-import unicodedata
+import zlib
 from collections import Counter, defaultdict
 
 import jieba
@@ -79,6 +79,7 @@ def main() -> None:
     parser.add_argument("--need", required=True, help="待注音词表，一行一词")
     parser.add_argument("--enough", type=int, default=4)
     parser.add_argument("--hours", type=float, default=1.5)
+    parser.add_argument("--shard", default="0/1", help="i/n：多卡时各取一份句子")
     parser.add_argument("--out", required=True)
     args = parser.parse_args()
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
@@ -132,7 +133,10 @@ def main() -> None:
 
     batch: list[str] = []
     deadline = started + args.hours * 3600
+    shard, shards = (int(x) for x in args.shard.split("/"))
     for run in mixed(args.max_chars):
+        if zlib.crc32(run.encode()) % shards != shard:
+            continue
         if any(piece in need for piece, _, _ in pieces(run)):
             batch.append(run)
         if len(batch) >= RUNS:

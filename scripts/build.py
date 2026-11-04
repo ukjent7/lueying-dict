@@ -40,7 +40,7 @@ TRUSTED = 4.0
 MIN_SHARE = 0.08
 MIN_OBSERVED = 4
 AMBIGUOUS = 0.97
-NEED_LIMIT = 300_000
+NEED_LIMIT = 600_000
 # 单字读音占比下限：规范字表收录的读音即使语料罕见也要能打出来。
 CHAR_FLOOR = 0.002
 COMBINING_V = {"ǖ": "v", "ǘ": "v", "ǚ": "v", "ǜ": "v", "ü": "v"}
