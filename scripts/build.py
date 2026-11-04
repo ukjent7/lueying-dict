@@ -41,6 +41,8 @@ TRUSTED = 4.0
 MIN_SHARE = 0.08
 MIN_OBSERVED = 4
 AMBIGUOUS = 0.97
+# 规范字表也收的异读，g2pW 却几乎只给它：血液 → xie'ye。
+MAINLAND = {("血", "xie"): "xue", ("熟", "shou"): "shu"}
 NEED_LIMIT = 600_000
 WEB_MIN_DF = 8
 # 单字读音占比下限：规范字表收录的读音即使语料罕见也要能打出来。
@@ -216,19 +218,39 @@ class Lexicon:
             del table
 
 
+def standardize(observed: dict[str, Counter], official: dict[str, list[str]]) -> dict[str, Counter]:
+    """把 g2pW 的台湾读音收敛到普通话：规范字表没有的读音改成表里的唯一读音。"""
+    def syllable(ch: str, s: str) -> str | None:
+        s = MAINLAND.get((ch, s), s)
+        legal = official.get(ch)
+        if not legal or s in legal:
+            return s
+        return legal[0] if len(legal) == 1 else None
+
+    result: dict[str, Counter] = defaultdict(Counter)
+    for word, seen in observed.items():
+        for key, count in seen.items():
+            keys = [syllable(ch, s) for ch, s in zip(word, key.split("'"))]
+            if all(keys):
+                result[word]["'".join(keys)] += count
+    return dict(result)
+
+
 def read_keys(word: str, observed: dict[str, Counter], phrases: dict[str, set[str]],
               primary: dict[str, str]) -> list[tuple[str, float]]:
-    """词的读音及占比。语料观测优先，其次词表，最后最长匹配拼接。"""
-    seen = observed.get(word)
-    if seen and sum(seen.values()) >= MIN_OBSERVED:
-        total = sum(seen.values())
-        kept = [(k, c / total) for k, c in seen.most_common() if c / total >= MIN_SHARE]
+    """词的读音及占比。语料观测与词表合并，都没有时最长匹配拼接。"""
+    seen = observed.get(word, Counter())
+    total = sum(seen.values())
+    if total < MIN_OBSERVED:
+        seen, total = Counter(), 0
+    # 词表读音保底占一半：观测带模型偏差，词表又漏口语音（还款、都会），两边都留。
+    merged = seen + Counter({key: max(total, 1) for key in phrases.get(word, ())})
+    if merged:
+        total = sum(merged.values())
+        kept = [(k, c / total) for k, c in merged.most_common() if c / total >= MIN_SHARE]
+        norm = sum(s for _, s in kept)
         if kept:
-            norm = sum(s for _, s in kept)
             return [(k, s / norm) for k, s in kept]
-    if word in phrases:
-        keys = sorted(phrases[word])
-        return [(k, 1.0 / len(keys)) for k in keys]
     if len(word) == 1:
         return [(primary[word], 1.0)] if word in primary else []
     parts: list[str] = []
@@ -239,10 +261,10 @@ def read_keys(word: str, observed: dict[str, Counter], phrases: dict[str, set[st
             found = None
             if j - i == 1:
                 found = primary.get(piece)
-            elif piece in observed and sum(observed[piece].values()) >= MIN_OBSERVED:
-                found = observed[piece].most_common(1)[0][0]
             elif piece in phrases:
                 found = sorted(phrases[piece])[0]
+            elif piece in observed and sum(observed[piece].values()) >= MIN_OBSERVED:
+                found = observed[piece].most_common(1)[0][0]
             if found:
                 parts.append(found)
                 i = j
@@ -354,8 +376,8 @@ def main() -> int:
 
     with open(args.readings, "rb") as f:
         observed_all = pickle.load(f)
-    observed: dict[str, Counter] = observed_all["grams"]
-    char_seen: dict[str, Counter] = observed_all["chars"]
+    observed = standardize(observed_all["grams"], official)
+    char_seen = standardize(observed_all["chars"], official)
 
     weights = learn_weights(args.stats, dev_tokens(args.dev, args.exclude))
     print("[mix]", {os.path.basename(s): round(w, 4) for s, w in zip(args.stats, weights)}, flush=True)
@@ -382,7 +404,10 @@ def main() -> int:
     primary: dict[str, str] = {}
     char_keys: dict[str, list[tuple[str, float]]] = {}
     for ch in set(official) | set(pinyin_data):
-        options = official.get(ch) or pinyin_data.get(ch, [])
+        # 规范字表按字母排序，常用读音的先后看 pinyin-data。
+        usual = pinyin_data.get(ch, [])
+        options = sorted(official.get(ch) or usual,
+                         key=lambda s: usual.index(s) if s in usual else len(usual))
         seen = char_seen.get(ch, Counter())
         total = sum(seen.values())
         shares = {s: (seen.get(s, 0) / total if total else 0.0) for s in options}

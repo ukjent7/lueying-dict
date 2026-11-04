@@ -32,15 +32,12 @@ from scan import MAX_DOC, MAX_WORD, HANZI_RUN, lccc, ultra
 RUNS = 1024
 MAX_RUN = 48
 TONE = re.compile(r"\d")
-# g2pW 训练数据带台湾读音，输入法按普通话规范收敛。
-TAIWAN = {("和", "han"): "he", ("熟", "shou"): "shu"}
 
 
-def syllable(ch: str, raw: str | None) -> str | None:
+def syllable(raw: str | None) -> str | None:
     if not raw:
         return None
     s = TONE.sub("", raw).lower().replace("ü", "v").replace("u:", "v")
-    s = TAIWAN.get((ch, s), s)
     s = {"lue": "lve", "nue": "nve"}.get(s, s)
     return s if s in LEGAL_SYLLABLES else None
 
@@ -115,7 +112,7 @@ def main() -> None:
         for run, raw in zip(runs, conv(runs)):
             if len(raw) != len(run):
                 continue
-            syl = [syllable(ch, r) for ch, r in zip(run, raw)]
+            syl = [syllable(r) for r in raw]
             for ch, s in zip(run, syl):
                 if s and ch in poly:
                     chars[ch][s] += 1
