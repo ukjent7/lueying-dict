@@ -11,17 +11,22 @@
 from __future__ import annotations
 
 import argparse
+import bisect
 import math
 import multiprocessing as mp
 import os
 import pickle
+import random
 import struct
 import sys
 
 from scan import HANZI_RUN, MAX_DOC, lccc, ultra
 
 MAGIC = b"LYCL"
-VERSION = 1
+VERSION = 2
+HEADER_LEN = 16
+RECORD_LEN = 5  # u32 指纹 + u8 分值
+SCALE = 255 / 6  # 分值 0~6 线性映射到 0~255,读端按同一尺度还原
 MAX_LEFT = 3
 LIMIT = 12_000_000
 BATCH = 256
@@ -71,18 +76,54 @@ def worker(queue, path: str, vocab: set[str], longest: int) -> None:
         pickle.dump((uni, pairs, tokens, total), f, protocol=pickle.HIGHEST_PROTOCOL)
 
 
+def fingerprint(key: str) -> int:
+    """词对指纹:FNV-1a 64 位哈希取高 32 位,与 Rust 端 gram.rs 的 fingerprint 一致。"""
+    return fnv1a(key.encode()) >> 32
+
+
+def quantize(score: float) -> int:
+    return max(0, min(255, round(score * SCALE)))
+
+
 def export(scored: list[tuple[float, float, str]], limit: int, path: str) -> None:
-    table: dict[int, int] = {}
+    # 布局:16 字节头 + count 个升序 u32 指纹 + count 个 u8 分值。同指纹取最高分。
+    best: dict[int, float] = {}
     for _, score, key in scored[:limit]:
-        h = fnv1a(key.encode())
-        value = max(-32768, min(32767, round(score * 1000)))
-        table[h] = max(table.get(h, value), value)
-    items = sorted(table.items())
+        fp = fingerprint(key)
+        best[fp] = max(best.get(fp, 0.0), score)
+    items = sorted(best.items())
     with open(path, "wb") as f:
         f.write(MAGIC + struct.pack("<III", VERSION, len(items), 0))
-        f.write(struct.pack(f"<{len(items)}Q", *(h for h, _ in items)))
-        f.write(struct.pack(f"<{len(items)}h", *(v for _, v in items)))
+        f.write(struct.pack(f"<{len(items)}I", *(fp for fp, _ in items)))
+        f.write(bytes(quantize(score) for _, score in items))
     print(f"[export] {path} {len(items)} 条 {os.path.getsize(path)/2**20:.2f} MiB", flush=True)
+    verify(path, scored[:limit], best)
+
+
+def verify(
+    path: str, pairs: list[tuple[float, float, str]], best: dict[int, float], samples: int = 1000
+) -> None:
+    """读回文件并随机抽词对:指纹须严格升序,二分查到的量化分值须与构建时一致。"""
+    with open(path, "rb") as f:
+        data = f.read()
+    if data[:4] != MAGIC or struct.unpack_from("<I", data, 4)[0] != VERSION:
+        raise RuntimeError(f"{path}: 魔数或版本不符")
+    count = struct.unpack_from("<I", data, 8)[0]
+    if len(data) != HEADER_LEN + RECORD_LEN * count:
+        raise RuntimeError(f"{path}: 长度 {len(data)} 与条数 {count} 不符")
+    fps = struct.unpack_from(f"<{count}I", data, HEADER_LEN)
+    qs = data[HEADER_LEN + 4 * count :]
+    if any(a >= b for a, b in zip(fps, fps[1:])):
+        raise RuntimeError(f"{path}: 指纹未严格升序")
+    sample = random.Random(0).sample(pairs, min(samples, len(pairs)))
+    for _, _, key in sample:
+        fp = fingerprint(key)
+        i = bisect.bisect_left(fps, fp)
+        if i == count or fps[i] != fp:
+            raise RuntimeError(f"读回缺失: {key!r}")
+        if qs[i] != quantize(best[fp]):
+            raise RuntimeError(f"分值不一致: {key!r} 读回 {qs[i]}")
+    print(f"[verify] {path} 随机抽查 {len(sample)} 对通过", flush=True)
 
 
 def main() -> int:
