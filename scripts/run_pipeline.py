@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
-掠影自研词库全套自动化构建流水线。
-结合 pypinyin-dict 权威消歧词典、通用规范汉字表、现代高质量语料 (FineWeb-2 + Tatoeba)
-进行无监督新词挖掘、G2P 注音、同口径 MLE 词频标定，并生成 main.tsv 与 main.pyd。
+掠影自研原生词典全套自动化构建流水线 (2026 现代人际互动与通用混合版)。
+结合:
+1. opencsg/smoltalk-chinese (2025/2026 现代生活与职场多轮对话)
+2. m-a-p/COIG-CQIA (2024/2025 小红书 xhs、豆瓣 douban、贴吧 ruozhiba 社交与网络热梗)
+3. HuggingFaceFW/fineweb-2 cmn_Hani (通用科技与百科底座)
+4. Tatoeba 口语短句 (8.9万条)
+5. 《通用规范汉字表》8105 字规范审音与 pypinyin-dict 百万级短语消歧库
+产出符合掠影规范的 main.tsv 与零拷贝二进制 main.pyd。
 """
 
 import os
@@ -15,7 +20,7 @@ from tqdm import tqdm
 from legal_syllables import LEGAL_SYLLABLES, normalize_pinyin_syllable
 from mine_words import NewWordMiner, is_cjk
 
-# 尝试载入超大规模离线拼音词典
+# 挂载超大规模离线拼音词典
 try:
     from pypinyin_dict.phrase_pinyin_data import large_pinyin
     large_pinyin.load()
@@ -101,65 +106,106 @@ def build_baseline_characters():
         chars.append(ch)
     return chars
 
-def run(sample_docs=30000, target_vocab_size=200000, tatoeba_path=None):
-    print("=" * 60)
-    print("开始执行掠影原生自主词典 (Lueying Dict) 全量流水线")
-    print("=" * 60)
+def run_multi_source_pipeline(target_vocab_size=200000, tatoeba_path="tatoeba_cmn.txt"):
+    print("=" * 65)
+    print("开始执行掠影 2026 现代人际互动加权词典全量构建流水线")
+    print("=" * 65)
 
-    # 1. 挖掘语料统计
-    miner = NewWordMiner(max_word_len=4, min_freq=6, min_cohesion=35.0, min_entropy=0.75)
+    miner = NewWordMiner(max_word_len=4, min_freq=5, min_cohesion=35.0, min_entropy=0.72)
+    from datasets import load_dataset
 
-    # 1.1 本地 Tatoeba 真实对话/口语短句
-    if tatoeba_path and os.path.exists(tatoeba_path):
-        print(f"1. 载入本地 Tatoeba 口语文本: {tatoeba_path}")
+    # 1. 本地 Tatoeba 真实短句
+    if os.path.exists(tatoeba_path):
+        print(f"[1/4] 载入本地 Tatoeba 口语短句: {tatoeba_path}")
         with open(tatoeba_path, "r", encoding="utf-8") as f:
             for line in f:
                 miner.feed_text(line.strip())
         print(f"Tatoeba 处理完毕，已扫描 Token: {miner.total_tokens}")
 
-    # 1.2 FineWeb-2 (cmn_Hani)
-    print(f"2. 从 FineWeb-2 (cmn_Hani) 流式挖掘现代语料 ({sample_docs} 篇)...")
+    # 2. opencsg/smoltalk-chinese (2025/2026 现代生活与职场多轮对话)
+    print("[2/4] 流式扫描 opencsg/smoltalk-chinese 现代多轮对话 (25,000 组对话)...")
     try:
-        from datasets import load_dataset
-        ds = load_dataset(
+        ds_smol = load_dataset("opencsg/smoltalk-chinese", split="train", streaming=True)
+        count = 0
+        pbar = tqdm(total=25000, desc="SmolTalk-CN 对话流")
+        for sample in ds_smol:
+            for turn in sample.get("conversations", []):
+                content = turn.get("content", "")
+                if content:
+                    miner.feed_text(content)
+            count += 1
+            pbar.update(1)
+            if count >= 25000:
+                break
+        pbar.close()
+    except Exception as e:
+        print(f"SmolTalk-CN 加载异常: {e}")
+
+    # 3. m-a-p/COIG-CQIA (小红书、豆瓣、贴吧网络热词与生活俚语)
+    print("[3/4] 流式扫描 m-a-p/COIG-CQIA 现代社交语料 (xhs + douban + ruozhiba)...")
+    subsets = [("xhs", 12000), ("douban", 12000), ("ruozhiba", 3000)]
+    for sub, limit in subsets:
+        try:
+            ds_sub = load_dataset("m-a-p/COIG-CQIA", sub, split="train", streaming=True)
+            c = 0
+            pbar = tqdm(total=limit, desc=f"COIG-CQIA ({sub})")
+            for item in ds_sub:
+                text = (item.get("instruction", "") or "") + " " + (item.get("output", "") or "")
+                if text.strip():
+                    miner.feed_text(text)
+                c += 1
+                pbar.update(1)
+                if c >= limit:
+                    break
+            pbar.close()
+        except Exception as e:
+            print(f"COIG-CQIA ({sub}) 加载异常: {e}")
+
+    # 4. HuggingFaceFW/fineweb-2 (通用科技与百科规范底座)
+    print("[4/4] 流式扫描 HuggingFaceFW/fineweb-2 通用科技与网页底座 (15,000 篇)...")
+    try:
+        ds_fw = load_dataset(
             "HuggingFaceFW/fineweb-2",
             name="cmn_Hani",
             split="train",
             streaming=True
         )
-        count = 0
-        pbar = tqdm(total=sample_docs, desc="FineWeb-2 语料扫描")
-        for item in ds:
+        c = 0
+        pbar = tqdm(total=15000, desc="FineWeb-2 语料扫描")
+        for item in ds_fw:
             text = item.get("text", "")
-            miner.feed_text(text)
-            count += 1
+            if text:
+                miner.feed_text(text)
+            c += 1
             pbar.update(1)
-            if count >= sample_docs:
+            if c >= 15000:
                 break
         pbar.close()
     except Exception as e:
         print(f"FineWeb-2 流式读取异常: {e}")
 
-    print(f"语料扫描总计完成，有效汉字 Token 数: {miner.total_tokens}")
+    print("-" * 65)
+    print(f"多源混合语料扫描总计完成！有效汉字 Token 达: {miner.total_tokens}")
+    print("-" * 65)
 
-    # 2. 提取新词
-    print("3. 执行无监督凝固度 (PMI) 与左右信息熵剪枝...")
+    # 5. 提取新词
+    print("5. 执行无监督凝固度 (PMI) 与左右信息熵剪枝...")
     candidates = miner.extract_words()
     print(f"新词挖掘提取成功: {len(candidates)} 条高质量词组")
 
-    # 3. 词条汇聚与 G2P 注音
-    print("4. 执行 G2P 自动注音与多音字消歧...")
+    # 6. G2P 自动注音与多音字消歧
+    print("6. 执行 G2P 自动注音与多音字消歧...")
     base_chars = build_baseline_characters()
     raw_dict = {} # (word, key) -> freq
 
-    # 3.1 单字
+    # 单字
     for ch in base_chars:
         key = get_word_pinyin(ch)
         if key:
             c = miner.ngram_counts[1].get(ch, 1)
             raw_dict[(ch, key)] = c
 
-    # 3.2 挖掘出的多字词
+    # 挖掘出的多字词
     for word, freq, cohesion, entropy in candidates:
         key = get_word_pinyin(word)
         if key:
@@ -167,43 +213,42 @@ def run(sample_docs=30000, target_vocab_size=200000, tatoeba_path=None):
             if len(raw_dict) >= target_vocab_size:
                 break
 
-    print(f"词典候选条数: {len(raw_dict)}")
+    print(f"词典初选条目数: {len(raw_dict)}")
 
-    # 4. 同口径 MLE 词频平滑
-    print("5. 执行同口径 MLE 次线性平滑与频次映射...")
+    # 7. 同口径 MLE 词频平滑
+    print("7. 执行同口径 MLE 次线性平滑与频次映射...")
     max_c = max(raw_dict.values()) if raw_dict else 1
     final_entries = [] # (word, key, freq)
 
     for (word, key), c in raw_dict.items():
         # 次线性对数平滑映射到 [10, 800000]
         score = 80000.0 * math.pow(c / max_c, 0.62) + math.log1p(c) * 120.0 + 10.0
-        # 多字词适度给予 1.25x 组合偏好,避免单字切碎
+        # 多字词给予 1.25x 组合偏好,保证整句输入时不被打碎成单字
         if len(word) >= 2:
             score *= 1.25
         final_freq = max(1, int(round(score)))
         final_entries.append((word, key, final_freq))
 
-    # 5. 排序: (key 升序, freq 降序, word 升序)
-    print("6. 严格按 (key, -freq, word) 排序...")
+    # 8. 严格排序: (key 升序, freq 降序, word 升序)
+    print("8. 严格按 (key, -freq, word) 排序...")
     final_entries.sort(key=lambda x: (x[1], -x[2], x[0]))
 
-    # 6. 导出 TSV 与 PYD
+    # 9. 导出 TSV 与 PYD
     tsv_path = os.path.join(OUT_DIR, "main.tsv")
-    print(f"7. 导出 TSV 文本词典: {tsv_path}")
+    print(f"9. 导出 TSV 文本词典: {tsv_path}")
     with open(tsv_path, "w", encoding="utf-8") as f:
         for word, key, freq in final_entries:
             f.write(f"{word}\t{freq}\t{key}\n")
 
     pyd_path = os.path.join(OUT_DIR, "main.pyd")
-    print(f"8. 导出 PYD1 紧凑二进制词典: {pyd_path}")
+    print(f"10. 导出 PYD1 紧凑二进制词典: {pyd_path}")
     pack_pyd(final_entries, pyd_path)
 
-    print("=" * 60)
+    print("=" * 65)
     print(f"掠影原生自主词典生成成功！总条目: {len(final_entries)}")
-    print("=" * 60)
+    print("=" * 65)
 
 if __name__ == "__main__":
-    tatoeba = sys.argv[1] if len(sys.argv) > 1 else None
-    docs = int(sys.argv[2]) if len(sys.argv) > 2 else 30000
-    vocab_size = int(sys.argv[3]) if len(sys.argv) > 3 else 180000
-    run(sample_docs=docs, target_vocab_size=vocab_size, tatoeba_path=tatoeba)
+    tatoeba = sys.argv[1] if len(sys.argv) > 1 else "tatoeba_cmn.txt"
+    vocab_size = int(sys.argv[2]) if len(sys.argv) > 2 else 200000
+    run_multi_source_pipeline(target_vocab_size=vocab_size, tatoeba_path=tatoeba)
