@@ -105,7 +105,7 @@ def main() -> None:
         grams.update(old["grams"])
         done = old["seen"]
     with open(args.need, encoding="utf-8") as f:
-        need = {w for w in f.read().split() if sum(grams[w].values()) < args.enough}
+        need = {w for w in f.read().split() if sum(grams.get(w, {}).values()) < args.enough}
     print(f"[g2p] need={len(need)} seen={done}", flush=True)
     started = time.time()
     mark = started

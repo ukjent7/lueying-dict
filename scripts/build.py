@@ -298,7 +298,7 @@ def necessity(entries: dict[str, list[tuple[str, float]]], p: dict[str, float]) 
             result[word] = 1.0
             continue
         syl = tuple(keys[0][0].split("'"))
-        result[word] = REDUNDANT if decode(syl, word) == word else 1.0
+        result[word] = 0.0 if decode(syl, word) == word else 1.0
     return result
 
 
@@ -338,6 +338,7 @@ def main() -> int:
     parser.add_argument("--min-count", type=int, default=3)
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--need", default="", help="导出待注音词表后退出")
+    parser.add_argument("--redundant", type=float, default=REDUNDANT, help="解码得出的词的效用折扣")
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -414,9 +415,10 @@ def main() -> int:
 
     singles = {ch: keys for ch, keys in char_keys.items() if ch in official}
     need = necessity({**singles, **candidates}, p)
-    utility = {w: p[w] * need[w] * (TRUSTED if w in common else 1.0) for w in candidates}
+    utility = {w: p[w] * (need[w] or args.redundant) * (TRUSTED if w in common else 1.0)
+               for w in candidates}
     ranked = sorted(candidates, key=lambda w: (-utility[w], w))
-    redundant = sum(1 for w in candidates if need[w] < 1.0)
+    redundant = sum(1 for w in candidates if not need[w])
     print(f"[select] redundant={redundant} ({redundant/len(candidates):.1%})", flush=True)
 
     colloquial = load_tsv(args.colloquial)
