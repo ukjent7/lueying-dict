@@ -28,7 +28,7 @@ from zhconv import convert
 from legal_syllables import LEGAL_SYLLABLES
 from scan import MAX_DOC, MAX_WORD, HANZI_RUN, lccc, ultra
 
-RUNS = 4096
+RUNS = 1024
 MAX_RUN = 48
 TONE = re.compile(r"\d")
 # g2pW 训练数据带台湾读音，输入法按普通话规范收敛。
@@ -137,6 +137,9 @@ def main() -> None:
     deadline = started + args.hours * 3600
     shard, shards = (int(x) for x in args.shard.split("/"))
     for run in mixed(args.max_chars):
+        # 待注音词越少批次越难凑满，上限要逐句检查。
+        if time.time() > deadline or not need:
+            break
         if zlib.crc32(run.encode()) % shards != shard:
             continue
         if any(piece in need for piece, _, _ in pieces(run)):
@@ -144,8 +147,6 @@ def main() -> None:
         if len(batch) >= RUNS:
             flush(batch)
             batch = []
-            if time.time() > deadline or not need:
-                break
     if batch:
         flush(batch)
     save()
