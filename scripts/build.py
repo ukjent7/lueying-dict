@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 """掠影词典构建：语料统计 + 上下文读音 → 多档 main.tsv / main.pyd。
 
-词条与词频只来自 scan.py 的语料统计和 TUBELEX 口语词频；读音优先取 annotate.py
+词条与词频只来自 scan.py 的语料统计，混合权重在开发集上学出来；读音优先取 annotate.py
 在真实句子上得到的分布，其次是词级词表（phrase-pinyin-data、CC-CEDICT），最后
 按最长匹配拼接。词典档位由同一条效用排序截断：
 
@@ -17,7 +17,6 @@ from __future__ import annotations
 import argparse
 import gzip
 import json
-import lzma
 import math
 import os
 import pickle
@@ -25,12 +24,14 @@ import re
 import struct
 import sys
 import unicodedata
+import zlib
 from collections import Counter, defaultdict
 
 from legal_syllables import LEGAL_SYLLABLES
 
 MAGIC = b"PYD2\x00\x00\x00\x01"
 HANZI = re.compile(r"^[一-鿿]+$")
+HANZI_RUN = re.compile("[\u4e00-\u9fff]+")
 MAX_LEN = 10
 # 与引擎 WORD_PENALTY 同义：路径每多一个词的对数代价。
 WORD_PENALTY = 2.2
@@ -41,6 +42,7 @@ MIN_SHARE = 0.08
 MIN_OBSERVED = 4
 AMBIGUOUS = 0.97
 NEED_LIMIT = 600_000
+WEB_MIN_DF = 8
 # 单字读音占比下限：规范字表收录的读音即使语料罕见也要能打出来。
 CHAR_FLOOR = 0.002
 COMBINING_V = {"ǖ": "v", "ǘ": "v", "ǚ": "v", "ǜ": "v", "ü": "v"}
@@ -134,55 +136,84 @@ def load_tsv(path: str) -> list[list[str]]:
         return [line.rstrip("\n").split("\t") for line in f if line.strip() and not line.startswith("#")]
 
 
-def load_stats(spec: str) -> tuple[dict[str, tuple[int, int]], int, float]:
-    path, weight = spec.rsplit(":", 1)
+def load_stats(path: str) -> tuple[dict[str, tuple[int, int]], int]:
+    """一个来源的词次与文档频次。1/2/3 元表里同一字串的次数相加，低频长尾不进内存。"""
     with open(path, "rb") as f:
         stats = pickle.load(f)
-    merged: dict[str, list[int]] = {}
+    merged: dict[str, tuple[int, int]] = {}
     for table in stats["grams"]:
         for word, packed in table.items():
-            slot = merged.setdefault(word, [0, 0])
-            slot[0] += packed >> 32
-            slot[1] = max(slot[1], packed & 0xFFFFFFFF)
+            count, df = packed >> 32, packed & 0xFFFFFFFF
+            if count >= 2 or len(word) == 1:
+                old = merged.get(word, (0, 0))
+                merged[word] = (old[0] + count, max(old[1], df))
     print(f"[stats] {path} tokens={stats['tokens']/1e6:.0f}M chars={stats['chars']/1e6:.0f}M "
-          f"grams={len(merged)} weight={weight}", flush=True)
-    return {k: (v[0], v[1]) for k, v in merged.items()}, stats["tokens"], float(weight)
+          f"grams={len(merged)}", flush=True)
+    return merged, stats["tokens"]
 
 
-def load_tubelex(path: str, weight: float) -> tuple[dict[str, tuple[int, int]], int, float]:
-    from zhconv import convert
+def dev_tokens(path: str, exclude: str) -> Counter:
+    """开发集词频：ctx-v1 按 unit 取偶数半，另一半留给 evaluate.py。各来源等权。"""
+    import jieba
 
-    table: dict[str, list[int]] = {}
-    tokens = 0
-    with lzma.open(path, "rt", encoding="utf-8") as f:
-        next(f)
-        for raw in f:
-            parts = raw.rstrip("\n").split("\t")
-            if not parts[1].isdigit():
+    with open(exclude, encoding="utf-8") as f:
+        held_out = {line.rstrip("\n").split("\t")[3] for line in f
+                    if not line.startswith("#") and line.count("\t") >= 3}
+    groups: dict[str, Counter] = defaultdict(Counter)
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for case in map(json.loads, f):
+            if zlib.crc32(case["unit"].encode()) % 2 or case["gold"] in held_out:
                 continue
-            tokens += int(parts[1])
-            word = convert(parts[0], "zh-hans")
-            if HANZI.match(word):
-                slot = table.setdefault(word, [0, 0])
-                slot[0] += int(parts[1])
-                slot[1] = max(slot[1], int(parts[3]))
-    return {k: (v[0], v[1]) for k, v in table.items()}, tokens, weight
+            for text in (case["gold"], case.get("context") or ""):
+                for run in HANZI_RUN.findall(text):
+                    groups[case["source"]].update(jieba.lcut(run, HMM=True))
+    tokens: Counter = Counter()
+    for group in groups.values():
+        total = sum(group.values())
+        for word, count in group.items():
+            tokens[word] += count / total
+    print(f"[dev] groups={ {k: sum(v.values()) for k, v in groups.items()} } types={len(tokens)}", flush=True)
+    return tokens
+
+
+def learn_weights(paths: list[str], tokens: Counter, rounds: int = 200) -> list[float]:
+    """EM 求混合权重：让线性插值的 unigram 在开发集上似然最大。"""
+    probs: list[dict[str, float]] = []
+    for path in paths:
+        table, total = load_stats(path)
+        probs.append({w: table[w][0] / total for w in tokens if w in table})
+    weights = [1.0 / len(paths)] * len(paths)
+    mass = sum(tokens.values())
+    for _ in range(rounds):
+        resp = [0.0] * len(paths)
+        for word, count in tokens.items():
+            parts = [lam * p.get(word, 0.0) for lam, p in zip(weights, probs)]
+            norm = sum(parts)
+            if norm > 0:
+                for i, part in enumerate(parts):
+                    resp[i] += count * part / norm
+        total = sum(resp) or mass
+        weights = [r / total for r in resp]
+    return weights
 
 
 class Lexicon:
-    """混合语料概率：各来源先归一到词次比例，再按语域权重线性插值。"""
+    """混合语料概率：各来源先归一到词次比例，再按学到的权重线性插值。
 
-    def __init__(self, sources: list[tuple[dict, int, float]], min_count: int, min_df: int):
-        total_weight = sum(w for _, _, w in sources)
+    Common Crawl 未经人工筛选，只在它一家出现的词要有更多站点支持才算成词。
+    """
+
+    def __init__(self, paths: list[str], weights: list[float], min_count: int, min_df: int):
         self.p: dict[str, float] = defaultdict(float)
-        supported: Counter[str] = Counter()
-        for table, tokens, weight in sources:
-            share = weight / total_weight / max(tokens, 1)
+        self.supported: set[str] = set()
+        for path, weight in zip(paths, weights):
+            table, tokens = load_stats(path)
+            floor = WEB_MIN_DF if os.path.basename(path).startswith("cc") else min_df
             for word, (count, df) in table.items():
-                self.p[word] += count * share
-                if count >= min_count and df >= min_df:
-                    supported[word] += 1
-        self.supported = set(supported)
+                self.p[word] += count * weight / tokens
+                if count >= min_count and df >= floor:
+                    self.supported.add(word)
+            del table
 
 
 def read_keys(word: str, observed: dict[str, Counter], phrases: dict[str, set[str]],
@@ -296,9 +327,9 @@ def pack_pyd(entries: list[tuple[str, str, int]], path: str) -> None:
 
 def main() -> int:
     parser = argparse.ArgumentParser()
-    parser.add_argument("--stats", nargs="+", required=True, help="路径:语域权重")
-    parser.add_argument("--tubelex", default="")
-    parser.add_argument("--tubelex-weight", type=float, default=1.0)
+    parser.add_argument("--stats", nargs="+", required=True, help="各来源统计；文件名 cc 开头按网页来源处理")
+    parser.add_argument("--dev", required=True, help="开发集 sampled.jsonl.gz，用来学混合权重")
+    parser.add_argument("--exclude", required=True, help="eval-shared-v1.tsv，从开发集里剔除")
     parser.add_argument("--readings", required=True, help="annotate.py 的输出")
     parser.add_argument("--cache", required=True, help="8105.txt pinyin-data.txt phrase-pinyin.txt cedict.gz")
     parser.add_argument("--new-words", default="wordlists/new_words.tsv")
@@ -325,10 +356,9 @@ def main() -> int:
     observed: dict[str, Counter] = observed_all["grams"]
     char_seen: dict[str, Counter] = observed_all["chars"]
 
-    sources = [load_stats(spec) for spec in args.stats]
-    if args.tubelex:
-        sources.append(load_tubelex(args.tubelex, args.tubelex_weight))
-    lex = Lexicon(sources, args.min_count, args.min_df)
+    weights = learn_weights(args.stats, dev_tokens(args.dev, args.exclude))
+    print("[mix]", {os.path.basename(s): round(w, 4) for s, w in zip(args.stats, weights)}, flush=True)
+    lex = Lexicon(args.stats, weights, args.min_count, args.min_df)
     p = lex.p
 
     if args.need:
@@ -419,7 +449,8 @@ def main() -> int:
                        "words": len({w for w, _, _ in entries})}
         print(f"[pack] {tag} entries={len(entries)} {mib:.2f} MiB", flush=True)
     with open(f"{args.out}/build_report.json", "w", encoding="utf-8") as f:
-        json.dump({"tiers": report, "candidates": len(candidates), "redundant": redundant}, f,
+        json.dump({"tiers": report, "candidates": len(candidates), "redundant": redundant,
+                   "mix": dict(zip(map(os.path.basename, args.stats), weights))}, f,
                   ensure_ascii=False, indent=2)
     return 0
 

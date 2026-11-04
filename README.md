@@ -17,6 +17,9 @@
 
 ## 选词
 
+语料分四类：网页基础层（Ultra-FineWeb、FineWeb-2）、对话（LCCC）、2025–2026 新文本
+（Common Crawl）。混合权重用 EM 在开发集上学，不手工指定；新词随新语料进入词频。
+
 所有档位由同一条效用排序截断：混合概率 × 词表可信度 × 解码必要性。解码必要性来自
 拿掉这个词后的整句解码，同一拼音仍能解出原词就说明它可以由更短的词拼出，收录它
 只增加体积。
@@ -26,8 +29,8 @@
 ```bash
 python3 scripts/scan.py --source ultra --max-chars 600000000 --out stats/ultra.pkl
 python3 scripts/annotate.py --max-chars 80000000 --out stats/readings.pkl
-python3 scripts/build.py --stats stats/ultra.pkl:1 stats/lccc.pkl:1 \
-  --tubelex cache/tubelex-zh.tsv.xz --readings stats/readings.pkl --cache cache
+python3 scripts/build.py --stats stats/*.pkl --readings stats/readings.pkl --cache cache \
+  --dev sampled.jsonl.gz --exclude eval-shared-v1.tsv
 python3 scripts/evaluate.py output/main-400k.tsv
 ```
 

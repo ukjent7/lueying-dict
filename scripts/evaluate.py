@@ -16,6 +16,7 @@ import json
 import os
 import re
 import sys
+import zlib
 from collections import Counter, defaultdict
 
 HANZI = re.compile(r"^[一-鿿]+$")
@@ -129,8 +130,9 @@ def main() -> int:
     sentences = [r for r in rows(os.path.join(args.eval_dir, "eval-shared-v1.tsv"))
                  if HANZI.match(r[3])]
     with gzip.open(args.context, "rt", encoding="utf-8") as f:
+        # 偶数 unit 是 build.py 的开发集，这里只用奇数半。
         cases = [c for c in map(json.loads, f) if c["style"] == "full" and HANZI.match(c["gold"])
-                 and len(c["gold"]) == len(c["readings"])]
+                 and len(c["gold"]) == len(c["readings"]) and zlib.crc32(c["unit"].encode()) % 2]
 
     failed = bool(leaked)
     if leaked:
