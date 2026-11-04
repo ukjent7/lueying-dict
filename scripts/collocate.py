@@ -5,7 +5,7 @@
 3 个字，左词更长的词对永远查不到，不占容量。评测句不参与构建。
 
 用法：python3 collocate.py output/main-400k.tsv --max-chars 200000000 \
-        --limits 180000,500000 --out output
+        --out output
 """
 
 from __future__ import annotations
@@ -89,8 +89,8 @@ def main() -> int:
     parser = argparse.ArgumentParser()
     parser.add_argument("dict")
     parser.add_argument("--max-chars", type=int, default=200_000_000)
-    parser.add_argument("--limits", default="180000,500000")
-    parser.add_argument("--clips", default="3", help="PMI 上限，逗号分隔")
+    parser.add_argument("--limits", default="1000000")
+    parser.add_argument("--clips", default="6", help="PMI 上限，逗号分隔")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
