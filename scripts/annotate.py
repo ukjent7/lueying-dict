@@ -22,6 +22,7 @@ import zlib
 from collections import Counter, defaultdict
 
 import jieba
+import onnxruntime
 from g2pw import G2PWConverter
 from zhconv import convert
 
@@ -86,6 +87,10 @@ def main() -> None:
     args = parser.parse_args()
     os.makedirs(os.path.dirname(args.out) or ".", exist_ok=True)
 
+    # 没有 CUDA 时 onnxruntime 只警告并退回 CPU，速度差两个数量级，不如直接失败。
+    onnxruntime.preload_dlls()
+    if "CUDAExecutionProvider" not in onnxruntime.get_available_providers():
+        raise SystemExit("onnxruntime 没有 CUDA，确认只装了 onnxruntime-gpu")
     conv = G2PWConverter(style="pinyin", enable_non_tradional_chinese=True, use_cuda=True,
                          batch_size=512, num_workers=0, turnoff_tqdm=True)
     # g2pW 的多音字表是繁体，语料已转简体。
