@@ -1,0 +1,410 @@
+#!/usr/bin/env python3
+"""掠影词典构建：语料统计 + 上下文读音 → 多档 main.tsv / main.pyd。
+
+词条与词频只来自 scan.py 的语料统计和 TUBELEX 口语词频；读音优先取 annotate.py
+在真实句子上得到的分布，其次是词级词表（phrase-pinyin-data、CC-CEDICT），最后
+按最长匹配拼接。词典档位由同一条效用排序截断：
+
+    效用 = 混合概率 × 词表可信度 × 解码必要性
+
+解码必要性来自拿掉这个词后的整句解码：同一拼音仍能解出这个词，说明它可由更短
+的词拼出（「的影响」= 的 + 影响），收录它只增加体积，效用打折。这样碎片词自然
+沉底，体积与准确率落在同一条曲线上。
+"""
+
+from __future__ import annotations
+
+import argparse
+import gzip
+import json
+import lzma
+import math
+import os
+import pickle
+import re
+import struct
+import sys
+import unicodedata
+from collections import Counter, defaultdict
+
+from legal_syllables import LEGAL_SYLLABLES
+
+MAGIC = b"PYD1\x00\x00\x00\x01"
+HANZI = re.compile(r"^[一-鿿]+$")
+MAX_LEN = 10
+# 与引擎 WORD_PENALTY 同义：路径每多一个词的对数代价。
+WORD_PENALTY = 2.2
+SCALE = 1_000_000_000
+REDUNDANT = 0.005
+TRUSTED = 4.0
+MIN_SHARE = 0.08
+MIN_OBSERVED = 4
+# 单字读音占比下限：规范字表收录的读音即使语料罕见也要能打出来。
+CHAR_FLOOR = 0.002
+COMBINING_V = {"ǖ": "v", "ǘ": "v", "ǚ": "v", "ǜ": "v", "ü": "v"}
+
+
+def toneless(raw: str) -> str:
+    """带调拼音 → 引擎音节。ü 要在去调之前处理，否则 ǚ 会被分解成 u。"""
+    s = "".join(COMBINING_V.get(ch, ch) for ch in raw.strip().lower()).replace("u:", "v")
+    s = unicodedata.normalize("NFD", s)
+    s = "".join(ch for ch in s if not unicodedata.combining(ch))
+    s = re.sub(r"[0-9]", "", s)
+    return {"lue": "lve", "nue": "nve", "r": "er"}.get(s, s)
+
+
+def split_pinyin(text: str) -> list[str]:
+    return [toneless(x) for x in re.split(r"[\s,，、]+", text.strip()) if x.strip()]
+
+
+def legal_key(word: str, syllables: list[str]) -> str | None:
+    if len(word) == len(syllables) and all(s in LEGAL_SYLLABLES for s in syllables):
+        return "'".join(syllables)
+    return None
+
+
+def load_8105(path: str) -> dict[str, list[str]]:
+    chars: dict[str, list[str]] = {}
+    with open(path, encoding="utf-8-sig") as f:
+        for raw in f:
+            parts = raw.rstrip("\n").split("\t")
+            if len(parts) < 3 or len(parts[1].strip()) != 1:
+                continue
+            ch = parts[1].strip()
+            found = [s for s in dict.fromkeys(split_pinyin(parts[2])) if s in LEGAL_SYLLABLES]
+            if found:
+                chars[ch] = found
+    # 这三个字规范读音是成音节鼻音，键盘上按常用近音输入。
+    for ch, fallback in {"呒": ["wu"], "呣": ["mu"], "嗯": ["en"]}.items():
+        chars.setdefault(ch, fallback)
+    return chars
+
+
+def load_pinyin_data(path: str) -> dict[str, list[str]]:
+    chars: dict[str, list[str]] = {}
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            m = re.match(r"U\+([0-9A-Fa-f]+):\s*([^#]+)", raw)
+            if m:
+                found = [s for s in dict.fromkeys(split_pinyin(m.group(2))) if s in LEGAL_SYLLABLES]
+                if found:
+                    chars[chr(int(m.group(1), 16))] = found
+    return chars
+
+
+def load_phrases(path: str) -> dict[str, set[str]]:
+    words: dict[str, set[str]] = defaultdict(set)
+    with open(path, encoding="utf-8") as f:
+        for raw in f:
+            if raw.startswith("#") or ":" not in raw:
+                continue
+            word, pinyin = (x.strip() for x in raw.split("#")[0].split(":", 1))
+            if HANZI.match(word) and 2 <= len(word) <= MAX_LEN:
+                key = legal_key(word, split_pinyin(pinyin))
+                if key:
+                    words[word].add(key)
+    return words
+
+
+def load_cedict(path: str, words: dict[str, set[str]]) -> set[str]:
+    """CC-CEDICT 只取简体普通词；专名首字母大写，不当作通用词表。"""
+    common: set[str] = set()
+    with gzip.open(path, "rt", encoding="utf-8") as f:
+        for raw in f:
+            m = re.match(r"\S+ (\S+) \[([^\]]+)\]", raw)
+            if not m or raw.startswith("#"):
+                continue
+            word, pinyin = m.groups()
+            if not HANZI.match(word) or not 2 <= len(word) <= MAX_LEN:
+                continue
+            key = legal_key(word, split_pinyin(pinyin.replace("5", "").lower()))
+            if key:
+                words[word].add(key)
+                if not pinyin[0].isupper():
+                    common.add(word)
+    return common
+
+
+def load_tsv(path: str) -> list[list[str]]:
+    if not path or not os.path.exists(path):
+        return []
+    with open(path, encoding="utf-8") as f:
+        return [line.rstrip("\n").split("\t") for line in f if line.strip() and not line.startswith("#")]
+
+
+def load_stats(spec: str) -> tuple[dict[str, tuple[int, int]], int, float]:
+    path, weight = spec.rsplit(":", 1)
+    with open(path, "rb") as f:
+        stats = pickle.load(f)
+    merged: dict[str, list[int]] = {}
+    for table in stats["grams"]:
+        for word, packed in table.items():
+            slot = merged.setdefault(word, [0, 0])
+            slot[0] += packed >> 32
+            slot[1] = max(slot[1], packed & 0xFFFFFFFF)
+    print(f"[stats] {path} tokens={stats['tokens']/1e6:.0f}M chars={stats['chars']/1e6:.0f}M "
+          f"grams={len(merged)} weight={weight}", flush=True)
+    return {k: (v[0], v[1]) for k, v in merged.items()}, stats["tokens"], float(weight)
+
+
+def load_tubelex(path: str, weight: float) -> tuple[dict[str, tuple[int, int]], int, float]:
+    from zhconv import convert
+
+    table: dict[str, list[int]] = {}
+    tokens = 0
+    with lzma.open(path, "rt", encoding="utf-8") as f:
+        next(f)
+        for raw in f:
+            parts = raw.rstrip("\n").split("\t")
+            if not parts[1].isdigit():
+                continue
+            tokens += int(parts[1])
+            word = convert(parts[0], "zh-hans")
+            if HANZI.match(word):
+                slot = table.setdefault(word, [0, 0])
+                slot[0] += int(parts[1])
+                slot[1] = max(slot[1], int(parts[3]))
+    return {k: (v[0], v[1]) for k, v in table.items()}, tokens, weight
+
+
+class Lexicon:
+    """混合语料概率：各来源先归一到词次比例，再按语域权重线性插值。"""
+
+    def __init__(self, sources: list[tuple[dict, int, float]], min_count: int, min_df: int):
+        total_weight = sum(w for _, _, w in sources)
+        self.p: dict[str, float] = defaultdict(float)
+        supported: Counter[str] = Counter()
+        for table, tokens, weight in sources:
+            share = weight / total_weight / max(tokens, 1)
+            for word, (count, df) in table.items():
+                self.p[word] += count * share
+                if count >= min_count and df >= min_df:
+                    supported[word] += 1
+        self.supported = set(supported)
+
+
+def read_keys(word: str, observed: dict[str, Counter], phrases: dict[str, set[str]],
+              primary: dict[str, str]) -> list[tuple[str, float]]:
+    """词的读音及占比。语料观测优先，其次词表，最后最长匹配拼接。"""
+    seen = observed.get(word)
+    if seen and sum(seen.values()) >= MIN_OBSERVED:
+        total = sum(seen.values())
+        kept = [(k, c / total) for k, c in seen.most_common() if c / total >= MIN_SHARE]
+        if kept:
+            norm = sum(s for _, s in kept)
+            return [(k, s / norm) for k, s in kept]
+    if word in phrases:
+        keys = sorted(phrases[word])
+        return [(k, 1.0 / len(keys)) for k in keys]
+    if len(word) == 1:
+        return [(primary[word], 1.0)] if word in primary else []
+    parts: list[str] = []
+    i = 0
+    while i < len(word):
+        for j in range(min(len(word), i + 6), i, -1):
+            piece = word[i:j]
+            found = None
+            if j - i == 1:
+                found = primary.get(piece)
+            elif piece in observed and sum(observed[piece].values()) >= MIN_OBSERVED:
+                found = observed[piece].most_common(1)[0][0]
+            elif piece in phrases:
+                found = sorted(phrases[piece])[0]
+            if found:
+                parts.append(found)
+                i = j
+                break
+        else:
+            return []
+    return [("'".join(parts), 1.0)]
+
+
+def necessity(entries: dict[str, list[tuple[str, float]]], p: dict[str, float]) -> dict[str, float]:
+    """拿掉词本身后解码它的拼音：解回原词就是冗余。
+
+    解码用与引擎同形的 unigram 路径分：Σ ln P(词) − 词数 × WORD_PENALTY。
+    """
+    best: dict[tuple[str, ...], list[tuple[float, str]]] = defaultdict(list)
+    for word, keys in entries.items():
+        lp = math.log(max(p.get(word, 0.0), 1e-12))
+        for key, share in keys:
+            best[tuple(key.split("'"))].append((lp + math.log(max(share, 1e-6)), word))
+    for key, items in best.items():
+        items.sort(reverse=True)
+        del items[2:]
+
+    def decode(syl: tuple[str, ...], banned: str) -> str:
+        n = len(syl)
+        score: list[float] = [-1e18] * (n + 1)
+        back: list[tuple[int, str]] = [(0, "")] * (n + 1)
+        score[0] = 0.0
+        for i in range(n):
+            if score[i] <= -1e18:
+                continue
+            for j in range(i + 1, min(n, i + 6) + 1):
+                for lp, word in best.get(syl[i:j], ()):
+                    if word == banned:
+                        continue
+                    cand = score[i] + lp - WORD_PENALTY
+                    if cand > score[j]:
+                        score[j] = cand
+                        back[j] = (i, word)
+                    break
+        if score[n] <= -1e18:
+            return ""
+        out = []
+        at = n
+        while at:
+            at, word = back[at][0], back[at][1]
+            out.append(word)
+        return "".join(reversed(out))
+
+    result: dict[str, float] = {}
+    for word, keys in entries.items():
+        if len(word) == 1:
+            result[word] = 1.0
+            continue
+        syl = tuple(keys[0][0].split("'"))
+        result[word] = REDUNDANT if decode(syl, word) == word else 1.0
+    return result
+
+
+def pack_pyd(entries: list[tuple[str, str, int]], path: str) -> None:
+    data = bytearray()
+    recs = bytearray()
+    sigs: list[tuple[bytes, int, int, int]] = []
+    for i, (word, key, freq) in enumerate(entries):
+        wb, kb = word.encode(), key.encode()
+        wo = len(data)
+        data += wb
+        ko = len(data)
+        data += kb
+        recs += struct.pack("<IIIIQ", wo, len(wb), ko, len(kb), freq)
+        sig = "".join(s[0] for s in key.split("'")).encode()
+        so = len(data)
+        data += sig
+        sigs.append((sig, so, len(sig), i))
+    sigs.sort(key=lambda item: (item[0], item[3]))
+    with open(path, "wb") as f:
+        f.write(MAGIC + struct.pack("<III", len(entries), len(data), len(sigs)))
+        f.write(recs)
+        f.write(data)
+        for _, so, sl, i in sigs:
+            f.write(struct.pack("<III", so, sl, i))
+
+
+def main() -> int:
+    parser = argparse.ArgumentParser()
+    parser.add_argument("--stats", nargs="+", required=True, help="路径:语域权重")
+    parser.add_argument("--tubelex", default="")
+    parser.add_argument("--tubelex-weight", type=float, default=1.0)
+    parser.add_argument("--readings", required=True, help="annotate.py 的输出")
+    parser.add_argument("--cache", required=True, help="8105.txt pinyin-data.txt phrase-pinyin.txt cedict.gz")
+    parser.add_argument("--new-words", default="wordlists/new_words.tsv")
+    parser.add_argument("--colloquial", default="wordlists/colloquial.tsv")
+    parser.add_argument("--sizes", default="200000,400000,600000,800000", help="多字词条档位")
+    parser.add_argument("--min-count", type=int, default=3)
+    parser.add_argument("--min-df", type=int, default=2)
+    parser.add_argument("--out", default="output")
+    args = parser.parse_args()
+    os.makedirs(args.out, exist_ok=True)
+
+    cache = args.cache
+    official = load_8105(f"{cache}/8105.txt")
+    pinyin_data = load_pinyin_data(f"{cache}/pinyin-data.txt")
+    phrases = load_phrases(f"{cache}/phrase-pinyin.txt")
+    common = set(phrases) | load_cedict(f"{cache}/cedict.gz", phrases)
+    new_words = {row[0]: row for row in load_tsv(args.new_words)}
+    print(f"[load] official={len(official)} pinyin_data={len(pinyin_data)} phrases={len(phrases)} "
+          f"common={len(common)} new={len(new_words)}", flush=True)
+
+    with open(args.readings, "rb") as f:
+        observed_all = pickle.load(f)
+    observed: dict[str, Counter] = observed_all["grams"]
+    char_seen: dict[str, Counter] = observed_all["chars"]
+
+    sources = [load_stats(spec) for spec in args.stats]
+    if args.tubelex:
+        sources.append(load_tubelex(args.tubelex, args.tubelex_weight))
+    lex = Lexicon(sources, args.min_count, args.min_df)
+    p = lex.p
+
+    # 单字：规范字表全收；读音占比取语料观测，未观测的规范读音保留下限。
+    primary: dict[str, str] = {}
+    char_keys: dict[str, list[tuple[str, float]]] = {}
+    for ch in set(official) | set(pinyin_data):
+        options = official.get(ch) or pinyin_data.get(ch, [])
+        seen = char_seen.get(ch, Counter())
+        total = sum(seen.values())
+        shares = {s: (seen.get(s, 0) / total if total else 0.0) for s in options}
+        for s, c in seen.items():
+            if total and c / total >= MIN_SHARE and s not in shares:
+                shares[s] = c / total
+        if not total:
+            shares = {s: 1.0 / (i + 1) ** 2 for i, s in enumerate(options)}
+        ordered = sorted(shares, key=lambda s: -shares[s])
+        primary[ch] = ordered[0]
+        norm = sum(max(v, CHAR_FLOOR) for v in shares.values())
+        char_keys[ch] = [(s, max(shares[s], CHAR_FLOOR) / norm) for s in ordered]
+
+    # 多字候选：语料支持的词 + 词表收录的词 + 人工新词。
+    candidates: dict[str, list[tuple[str, float]]] = {}
+    floor = min((v for v in p.values() if v > 0), default=1e-10)
+    pool = {w for w in lex.supported if 2 <= len(w) <= MAX_LEN} | {w for w in common if len(w) <= 6}
+    pool |= set(new_words)
+    for word in pool:
+        if not HANZI.match(word) or not all(ch in primary for ch in word):
+            continue
+        keys = read_keys(word, observed, phrases, primary)
+        if keys:
+            candidates[word] = keys
+    for word in common:
+        p[word] = max(p.get(word, 0.0), floor)
+    for word, row in new_words.items():
+        p[word] = max(p.get(word, 0.0), int(row[1]) / SCALE)
+    print(f"[select] candidates={len(candidates)}", flush=True)
+
+    singles = {ch: keys for ch, keys in char_keys.items() if ch in official}
+    need = necessity({**singles, **candidates}, p)
+    utility = {w: p[w] * need[w] * (TRUSTED if w in common else 1.0) for w in candidates}
+    ranked = sorted(candidates, key=lambda w: (-utility[w], w))
+    redundant = sum(1 for w in candidates if need[w] < 1.0)
+    print(f"[select] redundant={redundant} ({redundant/len(candidates):.1%})", flush=True)
+
+    colloquial = load_tsv(args.colloquial)
+    report = {}
+    for size in (int(x) for x in args.sizes.split(",")):
+        chosen = set(ranked[:size]) | set(new_words)
+        rows: dict[tuple[str, str], int] = {}
+        for ch, keys in singles.items():
+            base = max(p.get(ch, 0.0), 1e-9)
+            for key, share in keys:
+                rows[(ch, key)] = max(1, round(base * share * SCALE))
+        for word in chosen:
+            for key, share in candidates.get(word, []):
+                rows[(word, key)] = max(1, round(p[word] * share * SCALE))
+        for row in new_words.values():
+            if len(row) >= 3:
+                rows.setdefault((row[0], row[2]), max(1, round(p[row[0]] * SCALE)))
+        for word, key in ((r[0], r[1]) for r in colloquial):
+            best = max((f for (w, _), f in rows.items() if w == word), default=0)
+            if best:
+                rows[(word, key)] = best
+        entries = sorted(((w, k, f) for (w, k), f in rows.items()), key=lambda e: (e[1], -e[2], e[0]))
+        tag = f"{size // 1000}k"
+        with open(f"{args.out}/main-{tag}.tsv", "w", encoding="utf-8") as f:
+            for word, key, freq in entries:
+                f.write(f"{word}\t{freq}\t{key}\n")
+        pack_pyd(entries, f"{args.out}/main-{tag}.pyd")
+        mib = os.path.getsize(f"{args.out}/main-{tag}.pyd") / 2**20
+        report[tag] = {"entries": len(entries), "mib": round(mib, 2),
+                       "words": len({w for w, _, _ in entries})}
+        print(f"[pack] {tag} entries={len(entries)} {mib:.2f} MiB", flush=True)
+    with open(f"{args.out}/build_report.json", "w", encoding="utf-8") as f:
+        json.dump({"tiers": report, "candidates": len(candidates), "redundant": redundant}, f,
+                  ensure_ascii=False, indent=2)
+    return 0
+
+
+if __name__ == "__main__":
+    sys.exit(main())

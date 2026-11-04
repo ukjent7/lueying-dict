@@ -1,10 +1,43 @@
-# 掠影拼音输入法原生自主词典 (Lueying Dict)
+# 掠影词典 (Lueying Dict)
 
-面向掠影输入法的原生自研高质量现代中文词库。
+掠影输入法的自研词库。词条和词频来自语料统计，读音来自真实句子上的上下文注音，
+构建不读取任何第三方输入法词库。
 
-## 设计目标与特性
+## 流水线
 
-1. **纯净自主版权**：彻底摆脱 GPL-3.0 词库依赖，基底基于国家《通用规范汉字表》（8105 字）、《普通话异读词审音表》与开放数据源。
-2. **现代口语与科技热词**：在 FineWeb-2、ChineseWebText 与影视口语字幕（SUBTLEX-CH）上通过无监督凝固度（PMI 木桶原则）与左右信息熵（边界自由度）自动挖掘。
-3. **与搭配表同口径（MLE 标定）**：词频与 `collocation.bin` 搭配表在同一份现代语料上由同一套分词切分统计，消除一阶段概率失配。
-4. **极致紧凑**：剔除传统词库遗留的爬虫碎片死词，收录 20~25 万条高纯度精品词，体积缩小 40%，命中率稳步提升。
+| 阶段 | 脚本 | 产物 |
+|---|---|---|
+| 语料统计 | `scripts/scan.py` | 每个来源一份词次与文档频次 |
+| 上下文注音 | `scripts/annotate.py` | 词的实际读音分布（g2pW，需要 GPU） |
+| 选词打包 | `scripts/build.py` | 多档 `main-<档位>.tsv` / `.pyd` |
+| 门禁 | `scripts/evaluate.py` | 词形、读音、可达性检查 |
+
+各阶段通过中间文件衔接，换掉一个阶段（新的注音模型、新的语料）不影响其余部分。
+语料阶段和注音阶段在 Colab 上用 `colab` CLI 跑。
+
+## 选词
+
+所有档位由同一条效用排序截断：混合概率 × 词表可信度 × 解码必要性。解码必要性来自
+拿掉这个词后的整句解码，同一拼音仍能解出原词就说明它可以由更短的词拼出，收录它
+只增加体积。
+
+## 构建
+
+```bash
+python3 scripts/scan.py --source ultra --max-chars 600000000 --out stats/ultra.pkl
+python3 scripts/annotate.py --max-chars 80000000 --out stats/readings.pkl
+python3 scripts/build.py --stats stats/ultra.pkl:1 stats/lccc.pkl:1 \
+  --tubelex cache/tubelex-zh.tsv.xz --readings stats/readings.pkl --cache cache
+python3 scripts/evaluate.py output/main-400k.tsv
+```
+
+`cache/` 放 `8105.txt`、`pinyin-data.txt`、`phrase-pinyin.txt`、`cedict.gz`。
+
+## 新词
+
+`wordlists/new_words.tsv` 只收公开榜单上的新词，不收评测集里的词；门禁会检查两者
+没有交集。
+
+## 许可
+
+词典以 GPL-3.0-or-later 随掠影分发，数据来源见 [NOTICE](NOTICE)。

@@ -3,6 +3,7 @@ __pycache__/
 data/
 output/
 *.tsv
+!wordlists/*.tsv
 *.pyd
 *.part
 .DS_Store

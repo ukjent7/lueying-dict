@@ -1,0 +1,17 @@
+# 词典数据来源与许可
+
+语料（仅用于统计词频，不再分发原文）：
+- Ultra-FineWeb: Apache-2.0, https://huggingface.co/datasets/openbmb/Ultra-FineWeb
+- FineWeb-2: ODC-By, https://huggingface.co/datasets/HuggingFaceFW/fineweb-2
+- LCCC: MIT, https://github.com/thu-coai/CDial-GPT
+- TUBELEX: BSD-3-Clause, https://github.com/naist-nlp/tubelex
+
+读音：
+- 《通用规范汉字表》：国务院公布的官方文件
+- pinyin-data、phrase-pinyin-data: MIT, https://github.com/mozillazg
+- CC-CEDICT: CC BY-SA 4.0, https://cc-cedict.org/wiki/
+- g2pW 模型: Apache-2.0, https://github.com/GitYCC/g2pW
+
+工具：jieba 分词 (MIT)。
+
+新词：项目依据公开年度榜单整理，随本仓库以 GPL-3.0-or-later 分发。
