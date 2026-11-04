@@ -1,0 +1,8 @@
+__pycache__/
+*.pyc
+data/
+output/
+*.tsv
+*.pyd
+*.part
+.DS_Store
