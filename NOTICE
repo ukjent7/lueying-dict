@@ -15,3 +15,7 @@
 工具：jieba 分词 (MIT)。
 
 新词：项目依据公开年度榜单整理，随本仓库以 GPL-3.0-or-later 分发。
+
+新词候选（只取词形，不取词频与读音）：
+- 万象词库: CC BY 4.0, 作者 amzxyz, https://github.com/amzxyz/rime-wanxiang
+- 白霜词库: GPL-3.0, https://github.com/gaboolic/rime-frost

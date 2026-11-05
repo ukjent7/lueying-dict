@@ -13,6 +13,12 @@ OUT = "/kaggle/working"
 REPO = "/kaggle/temp/lueying-dict"
 CACHE = "/kaggle/temp/cache"
 STATS = ("fineweb2", "lccc", "ultra", "cc1", "cc2")
+# 新词候选，半年更新一次：万象（CC BY 4.0）与白霜（GPL-3.0），只取词形。
+RAW = "https://raw.githubusercontent.com"
+SEEDS = (f"{RAW}/amzxyz/rime-wanxiang/b41495a9d257920eca6d5f50ef2fb693d6d6f779/dicts/jichu.dict.yaml",
+         f"{RAW}/gaboolic/rime-frost/3ba4f1df224823079b947ce1553441c36097b124/cn_dicts/base.dict.yaml",
+         f"{RAW}/gaboolic/rime-frost/3ba4f1df224823079b947ce1553441c36097b124/cn_dicts/ext.dict.yaml",
+         f"{RAW}/gaboolic/rime-frost/3ba4f1df224823079b947ce1553441c36097b124/cn_dicts/tencent.dict.yaml")
 
 
 def sh(cmd: str) -> None:
@@ -103,7 +109,12 @@ def annotate() -> None:
 def build() -> None:
     sh("pip install -q jieba zhconv datasets")
     checkout()
-    sh(f"python build.py {corpus_args(find('readings.pkl'))} --sizes {ARGS['sizes']} --out {OUT}")
+    seeds = []
+    for i, url in enumerate(SEEDS):
+        seeds.append(f"{CACHE}/seed{i}.yaml")
+        sh(f"curl -fsSL --retry 3 -o {seeds[-1]} {url}")
+    sh(f"python build.py {corpus_args(find('readings.pkl'))} --seeds {' '.join(seeds)} "
+       f"--sizes {ARGS['sizes']} --out {OUT}")
     tier = f"{int(ARGS['default']) // 1000}k"
     gate = "" if ARGS["gate"] else " || true"
     sh(f"python evaluate.py {OUT}/main-{tier}.tsv --eval-dir {os.path.dirname(find('eval-words.tsv'))} "

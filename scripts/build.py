@@ -204,6 +204,18 @@ def learn_weights(paths: list[str], tokens: Counter, rounds: int = 200) -> list[
     return weights
 
 
+def load_seeds(paths: list[str]) -> set[str]:
+    """社区词库补语料还没沉淀下来的新词。只取词形，读音和词频仍由本项目计算。"""
+    words: set[str] = set()
+    for path in paths:
+        with open(path, encoding="utf-8") as f:
+            for line in f:
+                word = line.split("\t", 1)[0]
+                if "\t" in line and 2 <= len(word) <= 6 and HANZI.match(word):
+                    words.add(word)
+    return words
+
+
 def is_spiky(path: str) -> bool:
     return os.path.basename(path).startswith("fineweb")
 
@@ -374,6 +386,7 @@ def main() -> int:
     parser.add_argument("--new-words", default="wordlists/new_words.tsv")
     parser.add_argument("--colloquial", default="wordlists/colloquial.tsv")
     parser.add_argument("--blocked", default="wordlists/blocked.txt")
+    parser.add_argument("--seeds", nargs="*", default=[], help="新词候选：Rime 词库文件，只取词形")
     parser.add_argument("--sizes", default="200000,400000,600000,800000", help="多字词条档位")
     parser.add_argument("--min-count", type=int, default=3)
     parser.add_argument("--min-df", type=int, default=2)
@@ -387,7 +400,7 @@ def main() -> int:
     official = load_8105(f"{cache}/8105.txt")
     pinyin_data = load_pinyin_data(f"{cache}/pinyin-data.txt")
     phrases = load_phrases(f"{cache}/phrase-pinyin.txt")
-    common = set(phrases) | load_cedict(f"{cache}/cedict.gz", phrases)
+    common = set(phrases) | load_cedict(f"{cache}/cedict.gz", phrases) | load_seeds(args.seeds)
     new_words = {row[0]: row for row in load_tsv(args.new_words)}
     print(f"[load] official={len(official)} pinyin_data={len(pinyin_data)} phrases={len(phrases)} "
           f"common={len(common)} new={len(new_words)}", flush=True)
