@@ -31,6 +31,7 @@ MAX_DOC = 4000
 BATCH = 64
 MAX_WORD = 6
 STALL = 1800
+MIN_YIELD = 0.5
 HANZI_RUN = re.compile(r"[一-鿿]+")
 # 只有出现这些高频繁体字才走较慢的繁简转换。
 HANZI_CHAR = re.compile(r"[\u4e00-\u9fff]")
@@ -131,7 +132,16 @@ def lccc():
 
 
 def fetch(url: str):
+    """Common Crawl 限流时返回 503，退避几次通常就能过。"""
     req = urllib.request.Request(url, headers={"User-Agent": "lueying-dict"})
+    for wait in (30, 60, 120, 300, 600):
+        try:
+            return urllib.request.urlopen(req, timeout=120)
+        except OSError as exc:
+            if getattr(exc, "code", None) == 404:
+                raise
+            print(f"[retry] {url}: {exc}", flush=True)
+            time.sleep(wait)
     return urllib.request.urlopen(req, timeout=120)
 
 
@@ -281,6 +291,9 @@ def main() -> None:
     merge(parts, args.out)
     for path in parts:
         os.remove(path)
+    # 流中断时保留已统计的部分，但太少就是来源出了问题，不能当成功往下走。
+    if sent < args.max_chars * MIN_YIELD:
+        raise SystemExit(f"{args.source} 只读到 {sent} 字，要求 {args.max_chars}")
 
 
 if __name__ == "__main__":
