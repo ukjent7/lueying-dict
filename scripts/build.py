@@ -39,6 +39,10 @@ SCALE = 1_000_000_000
 REDUNDANT = 0.05
 TRUSTED = 4.0
 SPAM_CAP = 500 / SCALE
+# FineWeb-2 混着成人站模板：自慰 286 ppm，其余来源都不到 4。高出其余来源最高值 SPIKE 倍的
+# 部分不算，只有它一家有的词最多算 LONE，这样真词回到真实词频，模板串掉出词典。
+SPIKE = 5.0
+LONE = 0.5e-6
 MIN_SHARE = 0.08
 MIN_OBSERVED = 4
 AMBIGUOUS = 0.97
@@ -200,6 +204,10 @@ def learn_weights(paths: list[str], tokens: Counter, rounds: int = 200) -> list[
     return weights
 
 
+def is_spiky(path: str) -> bool:
+    return os.path.basename(path).startswith("fineweb")
+
+
 class Lexicon:
     """混合语料概率：各来源先归一到词次比例，再按学到的权重线性插值。
 
@@ -209,11 +217,19 @@ class Lexicon:
     def __init__(self, paths: list[str], weights: list[float], min_count: int, min_df: int):
         self.p: dict[str, float] = defaultdict(float)
         self.supported: set[str] = set()
-        for path, weight in zip(paths, weights):
+        reference: dict[str, float] = defaultdict(float)
+        # FineWeb-2 最后算，它要拿其余来源当参照。
+        for path, weight in sorted(zip(paths, weights), key=lambda s: is_spiky(s[0])):
             table, tokens = load_stats(path)
             floor = WEB_MIN_DF if os.path.basename(path).startswith("cc") else min_df
+            spiky = is_spiky(path)
             for word, (count, df) in table.items():
-                self.p[word] += count * weight / tokens
+                share = count / tokens
+                if spiky:
+                    share = min(share, max(reference[word] * SPIKE, LONE))
+                else:
+                    reference[word] = max(reference[word], share)
+                self.p[word] += share * weight
                 if count >= min_count and df >= floor:
                     self.supported.add(word)
             del table
