@@ -18,7 +18,6 @@ import os
 import pickle
 import random
 import struct
-import sys
 
 from scan import HANZI_RUN, MAX_DOC, lccc, run, send, ultra
 
