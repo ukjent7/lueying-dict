@@ -39,6 +39,7 @@ SCALE = 1_000_000_000
 REDUNDANT = 0.05
 TRUSTED = 4.0
 SPAM_CAP = 500 / SCALE
+UNSOLVED = 8.0
 # FineWeb-2 混着成人站模板：自慰 286 ppm，其余来源都不到 4。高出其余来源最高值 SPIKE 倍的
 # 部分不算，只有它一家有的词最多算 LONE，这样真词回到真实词频，模板串掉出词典。
 SPIKE = 5.0
@@ -386,6 +387,7 @@ def main() -> int:
     parser.add_argument("--new-words", default="wordlists/new_words.tsv")
     parser.add_argument("--colloquial", default="wordlists/colloquial.tsv")
     parser.add_argument("--blocked", default="wordlists/blocked.txt")
+    parser.add_argument("--unsolved", type=float, default=UNSOLVED, help="词表收录且拼不出来的词的效用倍数")
     parser.add_argument("--seeds", nargs="*", default=[], help="新词候选：Rime 词库文件，只取词形")
     parser.add_argument("--sizes", default="200000,400000,600000,800000", help="多字词条档位")
     parser.add_argument("--min-count", type=int, default=3)
@@ -483,7 +485,12 @@ def main() -> int:
 
     singles = {ch: keys for ch, keys in char_keys.items() if ch in official}
     need = necessity({**singles, **candidates}, p)
-    utility = {w: p[w] * (need[w] or args.redundant) * (TRUSTED if w in common else 1.0)
+    # 两家社区词库都收、又拼不出来的词（首过效应）语料次数少，靠效用排不进去，但它们最需要收录。
+    # 只认两家共有的词：单家词里混着大量碎片，加权后词形覆盖反而下降。--seeds 第一个是万象，其余是白霜。
+    agreed = load_seeds(args.seeds[:1]) & load_seeds(args.seeds[1:])
+    utility = {w: p[w] * (need[w] or args.redundant)
+               * ((TRUSTED * (args.unsolved if need[w] and w in agreed else 1.0))
+                  if w in common else 1.0)
                for w in candidates}
     ranked = sorted(candidates, key=lambda w: (-utility[w], w))
     redundant = sum(1 for w in candidates if not need[w])
