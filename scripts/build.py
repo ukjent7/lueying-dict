@@ -36,7 +36,7 @@ MAX_LEN = 10
 # 与引擎 WORD_PENALTY 同义：路径每多一个词的对数代价。
 WORD_PENALTY = 2.2
 SCALE = 1_000_000_000
-REDUNDANT = 0.005
+REDUNDANT = 0.05
 TRUSTED = 4.0
 MIN_SHARE = 0.08
 MIN_OBSERVED = 4
@@ -376,8 +376,11 @@ def main() -> int:
 
     with open(args.readings, "rb") as f:
         observed_all = pickle.load(f)
-    observed = standardize(observed_all["grams"], official)
+    # 不足 MIN_OBSERVED 的观测 read_keys 不会用，先丢掉：几百万个 Counter 占内存最多。
+    observed = standardize({w: c for w, c in observed_all["grams"].items()
+                            if sum(c.values()) >= MIN_OBSERVED}, official)
     char_seen = standardize(observed_all["chars"], official)
+    del observed_all
 
     weights = learn_weights(args.stats, dev_tokens(args.dev, args.exclude))
     print("[mix]", {os.path.basename(s): round(w, 4) for s, w in zip(args.stats, weights)}, flush=True)

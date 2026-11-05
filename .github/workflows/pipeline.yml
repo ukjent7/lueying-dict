@@ -1,0 +1,52 @@
+# 词典全流程:Kaggle 上扫描、注音、构建,通过门禁后发 Release,再触发主仓基准。
+# 作业超过 6 小时被杀时重跑本工作流即可,pipeline.py 会接上进行中的内核。
+name: pipeline
+
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Release 标签
+        required: true
+      default:
+        description: main.pyd 用哪一档(多字词条数)
+        required: true
+        default: "600000"
+      hours:
+        description: 注音时长
+        required: true
+        default: "3"
+
+permissions:
+  contents: write
+
+concurrency:
+  group: pipeline-${{ inputs.tag }}
+
+jobs:
+  cloud:
+    runs-on: ubuntu-latest
+    timeout-minutes: 355
+    env:
+      KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      TAG: ${{ inputs.tag }}
+    steps:
+      - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
+      - run: pip install -q kaggle
+      - name: 云端构建
+        env:
+          TIER: ${{ inputs.default }}
+          HOURS: ${{ inputs.hours }}
+        run: python3 cloud/pipeline.py --tag "$TAG" --default "$TIER" --hours "$HOURS" --out dist
+      - name: 发布
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          gh release create "$TAG" --prerelease --title "$TAG" --notes "pipeline 自动构建" \
+            dist/main*.pyd dist/collocation.bin dist/build_report.json
+      - name: 触发主仓基准
+        env:
+          GH_TOKEN: ${{ secrets.LUEYING_TOKEN }}
+        run: |
+          tiers=$(jq -r '.tiers | keys | join(" ")' dist/build_report.json)
+          gh workflow run dict-bench.yml -R ukjent7/lueying -f tag="$TAG" -f tiers="$tiers" -f gram=collocation.bin
