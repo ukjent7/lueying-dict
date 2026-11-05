@@ -11,6 +11,7 @@ from collections import Counter, defaultdict
 
 OUT = "/kaggle/working"
 REPO = "/kaggle/temp/lueying-dict"
+CACHE = "/kaggle/temp/cache"
 STATS = ("fineweb2", "lccc", "ultra", "cc1", "cc2")
 
 
@@ -27,12 +28,18 @@ def checkout() -> None:
     sh(f"git init -q {REPO} && cd {REPO} && "
        f"git fetch -q --depth 1 https://github.com/ukjent7/lueying-dict {REF} && git checkout -q FETCH_HEAD")
     os.chdir(f"{REPO}/scripts")
+    # Kaggle 上传数据集时会解压 .gz，所以数据集里改了扩展名，这里还原。
+    os.makedirs(CACHE, exist_ok=True)
+    for source, target in (("8105.txt", "8105.txt"), ("pinyin-data.txt", "pinyin-data.txt"),
+                           ("phrase-pinyin.txt", "phrase-pinyin.txt"), ("cedict-gz.bin", "cedict.gz"),
+                           ("sampled-gz.bin", "sampled.jsonl.gz")):
+        shutil.copy(find(source), f"{CACHE}/{target}")
 
 
 def corpus_args(readings: str) -> str:
     stats = " ".join(find(f"{name}.pkl") for name in STATS)
-    return (f"--stats {stats} --dev {find('sampled.jsonl.gz')} --exclude {find('eval-shared-v1.tsv')} "
-            f"--readings {readings} --cache {os.path.dirname(find('8105.txt'))} "
+    return (f"--stats {stats} --dev {CACHE}/sampled.jsonl.gz --exclude {find('eval-shared-v1.tsv')} "
+            f"--readings {readings} --cache {CACHE} "
             f"--new-words ../wordlists/new_words.tsv --colloquial ../wordlists/colloquial.tsv")
 
 
@@ -97,7 +104,7 @@ def build() -> None:
     tier = f"{int(ARGS['default']) // 1000}k"
     gate = "" if ARGS["gate"] else " || true"
     sh(f"python evaluate.py {OUT}/main-{tier}.tsv --eval-dir {os.path.dirname(find('eval-words.tsv'))} "
-       f"--context {find('sampled.jsonl.gz')} --new-words ../wordlists/new_words.tsv{gate}")
+       f"--context {CACHE}/sampled.jsonl.gz --new-words ../wordlists/new_words.tsv{gate}")
     limit = ARGS["pairs"]
     sh(f"python collocate.py {OUT}/main-{tier}.tsv --max-chars {ARGS['chars']} --limits {limit} "
        f"--clips 6 --workers 4 --out {OUT}/colloc")
