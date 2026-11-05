@@ -17,6 +17,7 @@ import json
 import os
 import pickle
 import re
+import sys
 import time
 import zlib
 from collections import Counter, defaultdict
@@ -153,6 +154,9 @@ def main() -> None:
         flush(batch)
     save()
     print(f"[done] chars={done} grams={len(grams)} {time.time()-started:.0f}s", flush=True)
+    # datasets 的流式读取留有后台线程，提前停读时解释器退不出去，内核会一直挂着。
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":

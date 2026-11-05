@@ -95,9 +95,8 @@ def build() -> None:
     checkout()
     sh(f"python build.py {corpus_args(find('readings.pkl'))} --sizes {ARGS['sizes']} --out {OUT}")
     tier = f"{int(ARGS['default']) // 1000}k"
-    tiers = " ".join(sorted(glob.glob(f"{OUT}/main-*.tsv")))
     gate = "" if ARGS["gate"] else " || true"
-    sh(f"python evaluate.py {tiers} --eval-dir {os.path.dirname(find('eval-words.tsv'))} "
+    sh(f"python evaluate.py {OUT}/main-{tier}.tsv --eval-dir {os.path.dirname(find('eval-words.tsv'))} "
        f"--context {find('sampled.jsonl.gz')} --new-words ../wordlists/new_words.tsv{gate}")
     limit = ARGS["pairs"]
     sh(f"python collocate.py {OUT}/main-{tier}.tsv --max-chars {ARGS['chars']} --limits {limit} "

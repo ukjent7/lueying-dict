@@ -126,7 +126,7 @@ def verify(
     print(f"[verify] {path} 随机抽查 {len(sample)} 对通过", flush=True)
 
 
-def main() -> int:
+def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("dict")
     parser.add_argument("--max-chars", type=int, default=200_000_000)
@@ -199,8 +199,10 @@ def main() -> int:
         print(f"[score] clip={clip} kept={len(scored)} at_cap={sum(1 for s in scored if s[1] >= clip)}", flush=True)
         for limit in (int(x) for x in args.limits.split(",")):
             export(scored, limit, f"{args.out}/collocation-{limit // 1000}k-c{clip:g}.bin")
-    return 0
+    # datasets 的流式读取留有后台线程，提前停读时解释器退不出去，内核会一直挂着。
+    sys.stdout.flush()
+    os._exit(0)
 
 
 if __name__ == "__main__":
-    sys.exit(main())
+    main()
