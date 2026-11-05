@@ -14,7 +14,7 @@
 
 各阶段通过中间文件衔接，换掉一个阶段（新的注音模型、新的语料）不影响其余部分。
 全流程在云上自动跑：手动触发 `pipeline` 工作流，`cloud/pipeline.py` 在 Kaggle 上依次跑完各阶段，
-门禁通过后发 Release 并触发主仓基准。需要仓库密钥 `KAGGLE_API_TOKEN` 和 `LUEYING_TOKEN`。
+门禁通过后发 Release 并调用主仓基准。需要仓库密钥 `KAGGLE_API_TOKEN`。
 
 ## 选词
 

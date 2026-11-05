@@ -44,9 +44,10 @@ jobs:
         run: |
           gh release create "$TAG" --prerelease --title "$TAG" --notes "pipeline 自动构建" \
             dist/main*.pyd dist/collocation.bin dist/build_report.json
-      - name: 触发主仓基准
-        env:
-          GH_TOKEN: ${{ secrets.LUEYING_TOKEN }}
-        run: |
-          tiers=$(jq -r '.tiers | keys | join(" ")' dist/build_report.json)
-          gh workflow run dict-bench.yml -R ukjent7/lueying -f tag="$TAG" -f tiers="$tiers" -f gram=collocation.bin
+
+  bench:
+    needs: cloud
+    uses: ukjent7/lueying/.github/workflows/dict-bench.yml@main
+    with:
+      tag: ${{ inputs.tag }}
+      tiers: 200k 400k 600k 800k
