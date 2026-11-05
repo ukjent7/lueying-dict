@@ -51,7 +51,8 @@ class Kernel:
         found = re.search(r"KernelWorkerStatus\.(\w+)", result.stdout)
         if found:
             return found.group(1)
-        if "404" in result.stdout + result.stderr or "not found" in (result.stdout + result.stderr).lower():
+        # 不存在的内核也报无权访问。
+        if "Cannot access kernel" in result.stdout + result.stderr:
             return "MISSING"
         # 网络抖动或令牌过期：别把运行中的内核当成失败重推。
         raise RuntimeError(f"{self.slug}: {result.stdout}{result.stderr}")
