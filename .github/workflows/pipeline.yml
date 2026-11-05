@@ -16,6 +16,10 @@ on:
         description: 注音时长
         required: true
         default: "3"
+      cc:
+        description: 重扫 Common Crawl(默认用数据集里的统计)
+        type: boolean
+        default: false
 
 permissions:
   actions: write
@@ -36,6 +40,7 @@ jobs:
       TAG: ${{ inputs.tag }}
       TIER: ${{ inputs.default }}
       HOURS: ${{ inputs.hours }}
+      CC: ${{ inputs.cc }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
       # kaggle 漏声明了 six。
@@ -44,7 +49,8 @@ jobs:
         id: build
         run: |
           code=0
-          python3 cloud/pipeline.py --tag "$TAG" --default "$TIER" --hours "$HOURS" --budget 330 --out dist || code=$?
+          python3 cloud/pipeline.py --tag "$TAG" --default "$TIER" --hours "$HOURS" --budget 330 --out dist \
+            ${{ inputs.cc && '--cc' || '' }} || code=$?
           if [ "$code" = 75 ]; then
             echo "again=true" >> "$GITHUB_OUTPUT"
           elif [ "$code" != 0 ]; then
@@ -52,7 +58,7 @@ jobs:
           fi
       - name: 续跑
         if: steps.build.outputs.again == 'true'
-        run: gh workflow run pipeline.yml --ref main -f tag="$TAG" -f default="$TIER" -f hours="$HOURS"
+        run: gh workflow run pipeline.yml --ref main -f tag="$TAG" -f default="$TIER" -f hours="$HOURS" -f cc="$CC"
       - name: 发布
         if: steps.build.outputs.again != 'true'
         run: |

@@ -4,7 +4,9 @@
 幂等：内核名带标签，已完成的阶段跳过，运行中的接着等，失败的重推。GitHub Actions
 单个作业最多 6 小时：等到 --budget 分钟就以退出码 75 结束，工作流据此自己续跑。
 
-静态输入在私有数据集 DATASET：字表与词表、开发集、评测集、readings-seed.pkl。
+静态输入在私有数据集 DATASET：字表与词表、开发集、评测集、readings-seed.pkl、cc1/cc2 统计。
+Common Crawl 整体限流时扫不动（S3 SlowDown，换平台也一样），默认用数据集里的统计，
+要更新新词时加 --cc 重扫。
 
 用法：python3 cloud/pipeline.py --tag v0.2.0 --out dist
       python3 cloud/pipeline.py --tag smoke1 --smoke --out dist   # 千分之一规模走通流程
@@ -30,6 +32,8 @@ SCANS = {
     "fineweb2": {"source": "fineweb2", "chars": 200_000_000},
     "lccc": {"source": "lccc", "chars": 200_000_000},
     "ultra": {"source": "ultra", "chars": 100_000_000},
+}
+FRESH = {
     "cc1": {"source": "commoncrawl", "chars": 300_000_000, "seed": 1},
     "cc2": {"source": "commoncrawl", "chars": 300_000_000, "seed": 2},
 }
@@ -115,6 +119,7 @@ def main() -> None:
     parser.add_argument("--default", default="600000", help="main.pyd 用哪一档")
     parser.add_argument("--hours", type=float, default=3.0, help="注音时长")
     parser.add_argument("--budget", type=float, default=1e6, help="最多等多少分钟")
+    parser.add_argument("--cc", action="store_true", help="重扫 Common Crawl")
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
 
@@ -123,9 +128,10 @@ def main() -> None:
                          check=True).stdout.strip()
     scale = 0.001 if args.smoke else 1.0
     deadline = time.time() + args.budget * 60
+    sources = {**SCANS, **FRESH} if args.cc else SCANS
     run([Kernel(tag, "scan", name, {**spec, "name": name, "chars": int(spec["chars"] * scale)}, ref)
-         for name, spec in SCANS.items()], deadline)
-    scans = tuple(SCANS)
+         for name, spec in sources.items()], deadline)
+    scans = tuple(sources)
     run([Kernel(tag, "need", "need", {}, ref, scans)], deadline)
     run([Kernel(tag, "annotate", "annotate", {"hours": 0.05 if args.smoke else args.hours}, ref,
                 ("need",), gpu=True)], deadline)

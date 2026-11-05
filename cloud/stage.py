@@ -21,7 +21,9 @@ def sh(cmd: str) -> None:
 
 
 def find(name: str) -> str:
-    return glob.glob(f"/kaggle/input/**/{name}", recursive=True)[0]
+    """内核产物优先于数据集里的同名文件。"""
+    paths = glob.glob(f"/kaggle/input/**/{name}", recursive=True)
+    return sorted(paths, key=lambda path: "lueying-dict-work" in path)[0]
 
 
 def checkout() -> None:
