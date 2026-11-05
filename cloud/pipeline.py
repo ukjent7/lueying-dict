@@ -2,7 +2,7 @@
 """词典全流程上云：在 Kaggle 上跑 扫描 → 选词 → 注音 → 构建，产物取回 --out。
 
 幂等：内核名带标签，已完成的阶段跳过，运行中的接着等，失败的重推。GitHub Actions
-单个作业最多 6 小时，到时重跑工作流就能接上。
+单个作业最多 6 小时：等到 --budget 分钟就以退出码 75 结束，工作流据此自己续跑。
 
 静态输入在私有数据集 DATASET：字表与词表、开发集、评测集、readings-seed.pkl。
 
@@ -24,6 +24,7 @@ import time
 USER = "ukjent"
 DATASET = f"{USER}/lueying-dict-work"
 HERE = os.path.dirname(os.path.abspath(__file__))
+CONTINUE = 75
 # 产物名、来源、规模；cc 开头的名字让 build.py 按网页来源处理。
 SCANS = {
     "fineweb2": {"source": "fineweb2", "chars": 200_000_000},
@@ -75,7 +76,7 @@ class Kernel:
         print(f"[push] {self.slug} {result.stdout.strip()} {result.stderr.strip()}", flush=True)
 
 
-def run(kernels: list[Kernel]) -> None:
+def run(kernels: list[Kernel], deadline: float) -> None:
     """推送一批互不依赖的内核并等全部完成。"""
     failed: set[str] = set()
     for kernel in kernels:
@@ -97,6 +98,9 @@ def run(kernels: list[Kernel]) -> None:
             waiting.remove(kernel)
             if state != "COMPLETE":
                 failed.add(kernel.slug)
+        if waiting and time.time() > deadline:
+            print(f"[budget] 还在等 {[k.slug for k in waiting]}", flush=True)
+            sys.exit(CONTINUE)
         if waiting:
             time.sleep(60)
     if failed:
@@ -110,6 +114,7 @@ def main() -> None:
     parser.add_argument("--sizes", default="200000,400000,600000,800000")
     parser.add_argument("--default", default="600000", help="main.pyd 用哪一档")
     parser.add_argument("--hours", type=float, default=3.0, help="注音时长")
+    parser.add_argument("--budget", type=float, default=1e6, help="最多等多少分钟")
     parser.add_argument("--smoke", action="store_true")
     args = parser.parse_args()
 
@@ -117,18 +122,19 @@ def main() -> None:
     ref = subprocess.run(["git", "rev-parse", "HEAD"], cwd=HERE, capture_output=True, text=True,
                          check=True).stdout.strip()
     scale = 0.001 if args.smoke else 1.0
+    deadline = time.time() + args.budget * 60
     run([Kernel(tag, "scan", name, {**spec, "name": name, "chars": int(spec["chars"] * scale)}, ref)
-         for name, spec in SCANS.items()])
+         for name, spec in SCANS.items()], deadline)
     scans = tuple(SCANS)
-    run([Kernel(tag, "need", "need", {}, ref, scans)])
+    run([Kernel(tag, "need", "need", {}, ref, scans)], deadline)
     run([Kernel(tag, "annotate", "annotate", {"hours": 0.05 if args.smoke else args.hours}, ref,
-                ("need",), gpu=True)])
+                ("need",), gpu=True)], deadline)
     build = Kernel(tag, "build", "build",
                    {"sizes": "2000,4000" if args.smoke else args.sizes,
                     "default": "4000" if args.smoke else args.default,
                     "chars": int(200_000_000 * scale), "pairs": 10_000 if args.smoke else 1_000_000,
                     "gate": not args.smoke}, ref, (*scans, "annotate"))
-    run([build])
+    run([build], deadline)
     os.makedirs(args.out, exist_ok=True)
     result = kaggle("kernels", "output", build.id, "-p", args.out, "-o")
     if result.returncode:

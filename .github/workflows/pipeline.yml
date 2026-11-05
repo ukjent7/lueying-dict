@@ -1,5 +1,5 @@
 # 词典全流程:Kaggle 上扫描、注音、构建,通过门禁后发 Release,再触发主仓基准。
-# 作业超过 6 小时被杀时重跑本工作流即可,pipeline.py 会接上进行中的内核。
+# 全量要跑十来个小时,作业快到 6 小时上限时重新触发自己,pipeline.py 接上进行中的内核。
 name: pipeline
 
 on:
@@ -18,6 +18,7 @@ on:
         default: "3"
 
 permissions:
+  actions: write
   contents: write
 
 concurrency:
@@ -27,26 +28,39 @@ jobs:
   cloud:
     runs-on: ubuntu-latest
     timeout-minutes: 355
+    outputs:
+      again: ${{ steps.build.outputs.again }}
     env:
       KAGGLE_API_TOKEN: ${{ secrets.KAGGLE_API_TOKEN }}
+      GH_TOKEN: ${{ github.token }}
       TAG: ${{ inputs.tag }}
+      TIER: ${{ inputs.default }}
+      HOURS: ${{ inputs.hours }}
     steps:
       - uses: actions/checkout@3d3c42e5aac5ba805825da76410c181273ba90b1 # v7.0.1
-      - run: pip install -q kaggle
+      - run: pipx install kaggle
       - name: 云端构建
-        env:
-          TIER: ${{ inputs.default }}
-          HOURS: ${{ inputs.hours }}
-        run: python3 cloud/pipeline.py --tag "$TAG" --default "$TIER" --hours "$HOURS" --out dist
+        id: build
+        run: |
+          code=0
+          python3 cloud/pipeline.py --tag "$TAG" --default "$TIER" --hours "$HOURS" --budget 330 --out dist || code=$?
+          if [ "$code" = 75 ]; then
+            echo "again=true" >> "$GITHUB_OUTPUT"
+          elif [ "$code" != 0 ]; then
+            exit "$code"
+          fi
+      - name: 续跑
+        if: steps.build.outputs.again == 'true'
+        run: gh workflow run pipeline.yml --ref main -f tag="$TAG" -f default="$TIER" -f hours="$HOURS"
       - name: 发布
-        env:
-          GH_TOKEN: ${{ github.token }}
+        if: steps.build.outputs.again != 'true'
         run: |
           gh release create "$TAG" --prerelease --title "$TAG" --notes "pipeline 自动构建" \
             dist/main*.pyd dist/collocation.bin dist/build_report.json
 
   bench:
     needs: cloud
+    if: needs.cloud.outputs.again != 'true'
     uses: ukjent7/lueying/.github/workflows/dict-bench.yml@main
     with:
       tag: ${{ inputs.tag }}
