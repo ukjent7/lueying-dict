@@ -18,9 +18,11 @@ import multiprocessing as mp
 import os
 import pickle
 import random
+import queue as queues
 import re
 import sys
 import time
+import traceback
 import urllib.request
 
 ONE = 1 << 32
@@ -28,6 +30,7 @@ LIMIT = 4_500_000
 MAX_DOC = 4000
 BATCH = 64
 MAX_WORD = 6
+STALL = 1800
 HANZI_RUN = re.compile(r"[一-鿿]+")
 # 只有出现这些高频繁体字才走较慢的繁简转换。
 HANZI_CHAR = re.compile(r"[\u4e00-\u9fff]")
@@ -192,6 +195,24 @@ def commoncrawl(seed: int = 0, per_crawl: int = 400):
 SOURCES = {"ultra": ultra, "fineweb2": fineweb2, "lccc": lccc, "commoncrawl": commoncrawl}
 
 
+def send(queue, item) -> None:
+    """worker 崩溃后队列不再被消费，等太久就报错，别永远阻塞。"""
+    queue.put(item, timeout=STALL)
+
+
+def run(main) -> None:
+    """跑完立即退出：datasets 的流式读取留有后台线程，解释器退不出去，内核会一直挂着。"""
+    code = 1
+    try:
+        main()
+        code = 0
+    except BaseException:  # noqa: BLE001 - 失败路径同样要退出
+        traceback.print_exc()
+    sys.stdout.flush()
+    sys.stderr.flush()
+    os._exit(code)
+
+
 def merge(paths: list[str], out: str) -> None:
     total = None
     for path in paths:
@@ -241,27 +262,26 @@ def main() -> None:
             sent += cjk
             docs += 1
             if len(batch) >= BATCH:
-                queue.put(batch)
+                send(queue, batch)
                 batch = []
             if docs % 5000 == 0:
                 print(f"[scan] {args.source} docs={docs} chars={sent/1e6:.0f}M {time.time()-started:.0f}s", flush=True)
             if sent >= args.max_chars:
                 break
+    except queues.Full:
+        raise
     except Exception as exc:  # noqa: BLE001 - 流中断时保留已统计的部分
         print(f"[warn] stream stopped: {exc}", flush=True)
     if batch:
-        queue.put(batch)
+        send(queue, batch)
     for _ in procs:
-        queue.put(None)
+        send(queue, None)
     for proc in procs:
         proc.join()
     merge(parts, args.out)
     for path in parts:
         os.remove(path)
-    # datasets 的流式读取留有后台线程，提前停读时解释器退不出去，内核会一直挂着。
-    sys.stdout.flush()
-    os._exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    run(main)

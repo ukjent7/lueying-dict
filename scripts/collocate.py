@@ -20,7 +20,7 @@ import random
 import struct
 import sys
 
-from scan import HANZI_RUN, MAX_DOC, lccc, ultra
+from scan import HANZI_RUN, MAX_DOC, lccc, run, send, ultra
 
 MAGIC = b"LYCL"
 VERSION = 2
@@ -135,6 +135,7 @@ def main() -> None:
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
+    os.makedirs(args.out, exist_ok=True)
 
     with open(args.dict, encoding="utf-8") as f:
         vocab = {line.split("\t", 1)[0] for line in f}
@@ -161,11 +162,11 @@ def main() -> None:
                 batch.append(run)
                 seen += len(run)
         if len(batch) >= BATCH:
-            queue.put(batch)
+            send(queue, batch)
             batch = []
-    queue.put(batch)
+    send(queue, batch)
     for _ in procs:
-        queue.put(None)
+        send(queue, None)
     for proc in procs:
         proc.join()
 
@@ -199,10 +200,7 @@ def main() -> None:
         print(f"[score] clip={clip} kept={len(scored)} at_cap={sum(1 for s in scored if s[1] >= clip)}", flush=True)
         for limit in (int(x) for x in args.limits.split(",")):
             export(scored, limit, f"{args.out}/collocation-{limit // 1000}k-c{clip:g}.bin")
-    # datasets 的流式读取留有后台线程，提前停读时解释器退不出去，内核会一直挂着。
-    sys.stdout.flush()
-    os._exit(0)
 
 
 if __name__ == "__main__":
-    main()
+    run(main)
