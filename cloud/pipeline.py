@@ -51,8 +51,8 @@ class Kernel:
         found = re.search(r"KernelWorkerStatus\.(\w+)", result.stdout)
         if found:
             return found.group(1)
-        # 不存在的内核也报无权访问。
-        if "Cannot access kernel" in result.stdout + result.stderr:
+        # 不存在的内核有时报无权访问，有时报 404。
+        if re.search(r"Cannot access kernel|404 Client Error", result.stdout + result.stderr):
             return "MISSING"
         # 网络抖动或令牌过期：别把运行中的内核当成失败重推。
         raise RuntimeError(f"{self.slug}: {result.stdout}{result.stderr}")
@@ -71,16 +71,15 @@ class Kernel:
                            "competition_sources": [], "kernel_sources": self.needs}, f)
             extra = ["--accelerator", "NvidiaTeslaT4"] if self.gpu else []
             result = kaggle("kernels", "push", "-p", folder, *extra)
-        print(f"[push] {self.slug} {result.stdout.strip()}", flush=True)
-        if result.returncode:
-            raise RuntimeError(result.stderr)
+        # 并发名额满时退出码也是 0，推送没成功就留给 run 下一轮重推。
+        print(f"[push] {self.slug} {result.stdout.strip()} {result.stderr.strip()}", flush=True)
 
 
 def run(kernels: list[Kernel]) -> None:
     """推送一批互不依赖的内核并等全部完成。"""
     failed: set[str] = set()
     for kernel in kernels:
-        if kernel.status() in ("MISSING", "ERROR", "CANCEL_ACKNOWLEDGED", "CANCELED"):
+        if kernel.status() in ("ERROR", "CANCEL_ACKNOWLEDGED", "CANCELED"):
             kernel.push()
     waiting = list(kernels)
     while waiting:
@@ -90,6 +89,8 @@ def run(kernels: list[Kernel]) -> None:
             except RuntimeError as error:
                 print(f"[wait] {error}", flush=True)
                 continue
+            if state == "MISSING":
+                kernel.push()
             if state in ("RUNNING", "QUEUED", "MISSING"):
                 continue
             print(f"[done] {kernel.slug} {state}", flush=True)
