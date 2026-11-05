@@ -131,7 +131,6 @@ def main() -> None:
     parser.add_argument("--max-chars", type=int, default=200_000_000)
     parser.add_argument("--limits", default="1000000")
     parser.add_argument("--clips", default="6", help="PMI 上限，逗号分隔")
-    parser.add_argument("--scores", default="pmi", help="打分方式:pmi(默认) 或 npmi,逗号分隔")
     parser.add_argument("--workers", type=int, default=2)
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
@@ -185,29 +184,21 @@ def main() -> None:
         os.remove(path)
     print(f"[count] tokens={tokens} pairs={len(pairs)}", flush=True)
 
-    for mode in args.scores.split(","):
-        for clip in (float(x) for x in args.clips.split(",")):
-            scored = []
-            for key, count in pairs.items():
-                if count < MIN_COUNT:
-                    continue
-                left, right = key.split("\0")
-                c_right = total / 10 if right == END else uni.get(right, count)
-                pmi = math.log2((count / total) / max(uni.get(left, count) / tokens * c_right / tokens, 1e-12))
-                if mode == "npmi":
-                    # 归一化 PMI 落在 [-1, 1]:不会像原始 PMI 那样大面积顶到封顶值。
-                    joint = count / total
-                    npmi = pmi / -math.log2(joint) if joint < 1 else 0.0
-                    score = clip * max(0.0, npmi) * count / (count + 5.0)
-                else:
-                    score = min(clip, pmi * count / (count + 5.0))
-                if score > 0:
-                    scored.append((count * max(0.1, score), score, key))
-            scored.sort(reverse=True)
-            print(f"[score] mode={mode} clip={clip} kept={len(scored)} at_cap={sum(1 for s in scored if s[1] >= clip)}", flush=True)
-            tag = "" if mode == "pmi" else f"{mode}-"
-            for limit in (int(x) for x in args.limits.split(",")):
-                export(scored, limit, f"{args.out}/collocation-{limit // 1000}k-{tag}c{clip:g}.bin")
+    for clip in (float(x) for x in args.clips.split(",")):
+        scored = []
+        for key, count in pairs.items():
+            if count < MIN_COUNT:
+                continue
+            left, right = key.split("\0")
+            c_right = total / 10 if right == END else uni.get(right, count)
+            pmi = math.log2((count / total) / max(uni.get(left, count) / tokens * c_right / tokens, 1e-12))
+            score = min(clip, pmi * count / (count + 5.0))
+            if score > 0:
+                scored.append((count * max(0.1, score), score, key))
+        scored.sort(reverse=True)
+        print(f"[score] clip={clip} kept={len(scored)} at_cap={sum(1 for s in scored if s[1] >= clip)}", flush=True)
+        for limit in (int(x) for x in args.limits.split(",")):
+            export(scored, limit, f"{args.out}/collocation-{limit // 1000}k-c{clip:g}.bin")
 
 
 if __name__ == "__main__":
