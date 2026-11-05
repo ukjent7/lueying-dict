@@ -38,6 +38,7 @@ WORD_PENALTY = 2.2
 SCALE = 1_000_000_000
 REDUNDANT = 0.05
 TRUSTED = 4.0
+SPAM_CAP = 500 / SCALE
 MIN_SHARE = 0.08
 MIN_OBSERVED = 4
 AMBIGUOUS = 0.97
@@ -356,6 +357,7 @@ def main() -> int:
     parser.add_argument("--cache", required=True, help="8105.txt pinyin-data.txt phrase-pinyin.txt cedict.gz")
     parser.add_argument("--new-words", default="wordlists/new_words.tsv")
     parser.add_argument("--colloquial", default="wordlists/colloquial.tsv")
+    parser.add_argument("--blocked", default="wordlists/blocked.txt")
     parser.add_argument("--sizes", default="200000,400000,600000,800000", help="多字词条档位")
     parser.add_argument("--min-count", type=int, default=3)
     parser.add_argument("--min-df", type=int, default=2)
@@ -439,7 +441,16 @@ def main() -> int:
         p[word] = max(p.get(word, 0.0), floor)
     for word, row in new_words.items():
         p[word] = max(p.get(word, 0.0), int(row[1]) / SCALE)
-    print(f"[select] candidates={len(candidates)}", flush=True)
+    # 网页语料里垃圾站的刷词清不干净：词表收录的词频封顶（别压过 自卫），别的直接不收。
+    with open(args.blocked, encoding="utf-8") as f:
+        spam = re.compile("|".join(w for line in f if not line.startswith("#") for w in line.split()))
+    blocked = [w for w in candidates if spam.search(w)]
+    for word in blocked:
+        if word in common:
+            p[word] = min(p[word], SPAM_CAP)
+        else:
+            del candidates[word]
+    print(f"[select] candidates={len(candidates)} blocked={len(blocked)}", flush=True)
 
     singles = {ch: keys for ch, keys in char_keys.items() if ch in official}
     need = necessity({**singles, **candidates}, p)

@@ -42,7 +42,8 @@ def corpus_args(readings: str) -> str:
     stats = " ".join(find(f"{name}.pkl") for name in STATS)
     return (f"--stats {stats} --dev {CACHE}/sampled.jsonl.gz --exclude {find('eval-shared-v1.tsv')} "
             f"--readings {readings} --cache {CACHE} "
-            f"--new-words ../wordlists/new_words.tsv --colloquial ../wordlists/colloquial.tsv")
+            f"--new-words ../wordlists/new_words.tsv --colloquial ../wordlists/colloquial.tsv "
+            f"--blocked ../wordlists/blocked.txt")
 
 
 def scan() -> None:
