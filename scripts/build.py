@@ -28,6 +28,7 @@ import zlib
 from collections import Counter, defaultdict
 
 from legal_syllables import LEGAL_SYLLABLES
+from jieba_tune import tune
 
 MAGIC = b"PYD2\x00\x00\x00\x01"
 HANZI = re.compile(r"^[一-鿿]+$")
@@ -164,6 +165,7 @@ def dev_tokens(path: str, exclude: str) -> Counter:
     """开发集词频：ctx-v1 按 unit 取偶数半，另一半留给 evaluate.py。各来源等权。"""
     import jieba
 
+    tune()
     with open(exclude, encoding="utf-8") as f:
         held_out = {line.rstrip("\n").split("\t")[3] for line in f
                     if not line.startswith("#") and line.count("\t") >= 3}

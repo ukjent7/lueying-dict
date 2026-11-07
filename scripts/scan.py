@@ -20,6 +20,8 @@ import pickle
 import random
 import queue as queues
 import re
+
+from jieba_tune import tune
 import sys
 import time
 import traceback
@@ -59,6 +61,7 @@ def worker(queue, path: str) -> None:
     from zhconv import convert
 
     jieba.initialize()
+    tune()
     tables = [{}, {}, {}]
     floors = [1, 1, 1]
     docs = chars = tokens = 0

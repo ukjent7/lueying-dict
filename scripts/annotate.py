@@ -22,6 +22,9 @@ import zlib
 from collections import Counter, defaultdict
 
 import jieba
+from jieba_tune import tune
+
+tune()
 import onnxruntime
 from g2pw import G2PWConverter
 from zhconv import convert
