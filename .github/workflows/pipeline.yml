@@ -61,8 +61,10 @@ jobs:
         run: gh workflow run pipeline.yml --ref main -f tag="$TAG" -f default="$TIER" -f hours="$HOURS" -f cc="$CC"
       - name: 发布
         if: steps.build.outputs.again != 'true'
+        env:
+          PRERELEASE_FLAG: ${{ contains(inputs.tag, '-rc') && '--prerelease' || '' }}
         run: |
-          gh release create "$TAG" --prerelease --title "$TAG" --notes "pipeline 自动构建" \
+          gh release create "$TAG" $PRERELEASE_FLAG --title "$TAG" --notes "pipeline 自动构建" \
             dist/main*.pyd dist/collocation.bin dist/build_report.json
 
   bench:
