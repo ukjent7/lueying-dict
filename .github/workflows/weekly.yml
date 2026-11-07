@@ -1,0 +1,58 @@
+# 定时发版:按仓库变量 CADENCE_DAYS(默认 7)决定今天发不发;无论如何
+# 两次发版间隔不超过半年。节奏到点就带 --cc 重扫 Common Crawl 跟新词,
+# 标签取最新版补丁位 +1(v0.2.1 起跳)。全量构建十来个小时,由 pipeline
+# 自己的续跑机制完成。
+name: weekly
+
+on:
+  schedule:
+    # 周一 03:00 UTC(北京 11:00);decide 步再按节奏变量决定真正跑不跑。
+    - cron: "0 3 * * 1"
+  workflow_dispatch:
+    inputs:
+      force:
+        description: 忽略节奏,立刻发
+        type: boolean
+        default: false
+
+permissions:
+  actions: write
+  contents: read
+
+concurrency:
+  group: weekly
+
+jobs:
+  decide:
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    env:
+      GH_TOKEN: ${{ github.token }}
+      FORCE: ${{ inputs.force }}
+      CADENCE: ${{ vars.CADENCE_DAYS || '7' }}
+    steps:
+      - name: 决定发版
+        run: |
+          set -euo pipefail
+          created=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=1" \
+            --jq '.[0].created_at // empty')
+          if [ -n "$created" ]; then
+            days=$(( ($(date +%s) - $(date -d "$created" +%s)) / 86400 ))
+          else
+            days=9999
+          fi
+          echo "上次发版:${created:-无}(${days} 天前);节奏 ${CADENCE} 天"
+          if [ "$FORCE" != "true" ] && [ "$days" -lt "$CADENCE" ] && [ "$days" -lt 180 ]; then
+            echo "未到节奏,跳过"
+            exit 0
+          fi
+          if gh run list -R "$GITHUB_REPOSITORY" --workflow pipeline.yml --status in_progress | grep -q pipeline; then
+            echo "上一条流水线还在跑,跳过"
+            exit 0
+          fi
+          base=$(gh api "repos/$GITHUB_REPOSITORY/releases?per_page=1" \
+            --jq '.[0].tag_name // "v0.0.0"' | sed 's/-rc[0-9]*$//')
+          tag="$(echo "$base" | cut -d. -f1).$(echo "$base" | cut -d. -f2).$(( $(echo "$base" | cut -d. -f3) + 1 ))"
+          echo "发起流水线:$tag(重扫 Common Crawl)"
+          gh workflow run pipeline.yml --ref main \
+            -f tag="$tag" -f default=600000 -f hours=3 -f cc=true
