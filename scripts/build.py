@@ -294,7 +294,12 @@ def read_keys(word: str, observed: dict[str, Counter], phrases: dict[str, set[st
             if j - i == 1:
                 found = primary.get(piece)
             elif piece in phrases:
-                found = sorted(phrases[piece])[0]
+                # 词表里的读音可能不止一个（CC-CEDICT 把 重點 的 chong2 变体也并进来了）。
+                # 取「与逐字首选读音一致的位置最多」的那个，别用字母序——字母序会稳定地
+                # 把 重点 → chong'dian，把带 重点 的四字串整条读错。
+                found = min(phrases[piece],
+                            key=lambda k: (-sum(1 for ch, s in zip(piece, k.split("'"))
+                                               if primary.get(ch) == s), k))
             elif piece in observed and sum(observed[piece].values()) >= MIN_OBSERVED:
                 found = observed[piece].most_common(1)[0][0]
             if found:
@@ -396,6 +401,8 @@ def main() -> int:
     parser.add_argument("--min-df", type=int, default=2)
     parser.add_argument("--need", default="", help="导出待注音词表后退出")
     parser.add_argument("--redundant", type=float, default=REDUNDANT, help="解码得出的词的效用折扣")
+    parser.add_argument("--charset-gate", type=int, default=1,
+                        help="多字词只收 8105 规范字表内的字（0 关闭，用于对照）")
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -464,8 +471,14 @@ def main() -> int:
     floor = min((v for v in p.values() if v > 0), default=1e-10)
     pool = {w for w in lex.supported if 2 <= len(w) <= MAX_LEN} | {w for w in common if len(w) <= 6}
     pool |= set(new_words)
+    gated = 0
     for word in pool:
         if not HANZI.match(word) or not all(ch in primary for ch in word):
+            continue
+        # 单字只发 8105 内的字，多字词却可以是 保険/対応/経験 这种日文汉字——同一个字符集口径下
+        # 这些字连单字词条都没有，整词留着只会去抢同键排序。
+        if args.charset_gate and not all(ch in official for ch in word):
+            gated += 1
             continue
         keys = read_keys(word, observed, phrases, primary)
         if keys:
@@ -483,7 +496,8 @@ def main() -> int:
             p[word] = min(p[word], SPAM_CAP)
         else:
             del candidates[word]
-    print(f"[select] candidates={len(candidates)} blocked={len(blocked)}", flush=True)
+    print(f"[select] candidates={len(candidates)} blocked={len(blocked)} charset_gated={gated}",
+          flush=True)
 
     singles = {ch: keys for ch, keys in char_keys.items() if ch in official}
     need = necessity({**singles, **candidates}, p)
