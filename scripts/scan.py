@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import argparse
 import gzip
+import heapq
 import io
 import json
 import multiprocessing as mp
@@ -26,6 +27,7 @@ import sys
 import time
 import traceback
 import urllib.request
+import zlib
 
 ONE = 1 << 32
 LIMIT = 4_500_000
@@ -42,6 +44,13 @@ WARC_HOST = re.compile(rb"WARC-Target-URI: https?://(?:www\.)?([^/\s:]+)")
 # 采样站点里占比最大的两类垃圾：博彩和色情，词频会被它们的固定话术污染。
 SPAM = re.compile("博彩|彩票|百家乐|时时彩|澳门|娱乐城|棋牌|赌场|开户|av|AV|成人|裸聊|一夜情|人妻|无码|三级片|代孕|发票|私服|外围")
 SITE_CAP = 30
+# 跨站转载挡不住：SITE_CAP 让每站各算一次，同一篇通稿被 200 个站转就拿到 200 份词频。
+# 文档级近重复检测用 5 字 shingle 的 bottom-k 草图：近重复稿共享大部分最小哈希，
+# 与已见草图重合 6/8 以上就整篇丢掉。
+SHINGLE = 5
+SKETCH = 8
+DUP_HITS = 6
+SKETCH_CAP = 6_000_000
 SEEN_LINES: set[int] = set()
 TRAD = re.compile("[這們個為來時國會對於說過還學發經應樣開從點當間現長見關與頭將實體問話給後裡讓]")
 
@@ -54,6 +63,37 @@ def lossy(table: dict, floor: int) -> tuple[dict, int]:
         kept = {k: v for k, v in table.items() if (v >> 32) >= floor}
         if len(kept) <= LIMIT // 2:
             return kept, floor
+
+
+class Dedup:
+    """文档级近重复检测：bottom-k 草图命中数达标即判重复。
+
+    只存 32 位草图值（每篇 8 个），比存整篇签名省一个量级；近重复稿共享 6 个以上
+    最小 shingle 哈希，随机稿件共享 0 个，所以不会误伤。
+    """
+
+    def __init__(self) -> None:
+        self.seen: set[int] = set()
+        self.dropped = 0
+        self.capped = False
+
+    def duplicate(self, text: str) -> bool:
+        if self.capped or len(text) < 200:
+            return False
+        hashes = [zlib.crc32(text[i:i + SHINGLE].encode()) for i in range(0, len(text) - SHINGLE, 2)]
+        if len(hashes) < SKETCH * 2:
+            return False
+        sketch = heapq.nsmallest(SKETCH, hashes)
+        hits = sum(h in self.seen for h in sketch)
+        if len(self.seen) < SKETCH_CAP:
+            self.seen.update(sketch)
+        else:
+            self.capped = True
+            print("[dedup] sketch cap reached, dedup off", flush=True)
+        if hits >= DUP_HITS:
+            self.dropped += 1
+            return True
+        return False
 
 
 def worker(queue, path: str) -> None:
@@ -261,6 +301,8 @@ def main() -> None:
     for proc in procs:
         proc.start()
 
+    dedup = Dedup()
+    skipped = 0
     sent = docs = 0
     batch: list[str] = []
     started = time.time()
@@ -270,6 +312,9 @@ def main() -> None:
             text = text[:MAX_DOC]
             cjk = sum(1 for ch in text if "一" <= ch <= "鿿")
             if cjk < (4 if args.source == "lccc" else 20):
+                continue
+            if dedup.duplicate(text):
+                skipped += 1
                 continue
             batch.append(text)
             sent += cjk
@@ -291,6 +336,8 @@ def main() -> None:
         send(queue, None)
     for proc in procs:
         proc.join()
+    if skipped:
+        print(f"[dedup] dropped={skipped} ({skipped/max(skipped+docs,1):.2%})", flush=True)
     merge(parts, args.out)
     for path in parts:
         os.remove(path)
