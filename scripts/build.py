@@ -229,7 +229,8 @@ class Lexicon:
     Common Crawl 未经人工筛选，只在它一家出现的词要有更多站点支持才算成词。
     """
 
-    def __init__(self, paths: list[str], weights: list[float], min_count: int, min_df: int):
+    def __init__(self, paths: list[str], weights: list[float], min_count: int, min_df: int,
+                 scheme: str = "cap", excess: float = 0.0):
         self.p: dict[str, float] = defaultdict(float)
         self.supported: set[str] = set()
         reference: dict[str, float] = defaultdict(float)
@@ -241,7 +242,20 @@ class Lexicon:
             for word, (count, df) in table.items():
                 share = count / tokens
                 if spiky:
-                    share = min(share, max(reference[word] * SPIKE, LONE))
+                    bound = max(reference[word] * SPIKE, LONE)
+                    if scheme == "raw":
+                        pass
+                    elif scheme == "soft":
+                        # 超出封顶的部分按 excess 线性折扣保留。
+                        share = min(share, bound) + excess * max(share - bound, 0.0)
+                    elif scheme == "pow":
+                        # 超出部分按幂律收缩：bound·(share/bound)^excess。
+                        # 极端尖峰（30~1000 倍，模板签名）被压在 bound 的小倍数上；
+                        # 5~20 倍的真高频词按比例多留住证据。
+                        if share > bound:
+                            share = bound * (share / bound) ** excess
+                    else:
+                        share = min(share, bound)
                 else:
                     reference[word] = max(reference[word], share)
                 self.p[word] += share * weight
@@ -403,6 +417,13 @@ def main() -> int:
     parser.add_argument("--redundant", type=float, default=REDUNDANT, help="解码得出的词的效用折扣")
     parser.add_argument("--charset-gate", type=int, default=1,
                         help="多字词只收 8105 规范字表内的字（0 关闭，用于对照）")
+    parser.add_argument("--spike-scheme", default="cap",
+                        choices=("cap", "raw", "soft", "pow"),
+                        help="FineWeb-2 尖峰处理: cap=现行硬封顶; raw=不封顶; soft/pow=超出部分线性/幂律折扣")
+    parser.add_argument("--excess", type=float, default=0.3,
+                        help="soft 的线性保留率 / pow 的指数")
+    parser.add_argument("--colloquial-freq", default="",
+                        help="口语词频下限表（词\\t每十亿次计数），词频低于下限的抬到下限")
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -426,7 +447,8 @@ def main() -> int:
 
     weights = learn_weights(args.stats, dev_tokens(args.dev, args.exclude))
     print("[mix]", {os.path.basename(s): round(w, 4) for s, w in zip(args.stats, weights)}, flush=True)
-    lex = Lexicon(args.stats, weights, args.min_count, args.min_df)
+    lex = Lexicon(args.stats, weights, args.min_count, args.min_df,
+                  args.spike_scheme, args.excess)
     p = lex.p
 
     if args.need:
@@ -487,6 +509,18 @@ def main() -> int:
         p[word] = max(p.get(word, 0.0), floor)
     for word, row in new_words.items():
         p[word] = max(p.get(word, 0.0), int(row[1]) / SCALE)
+    # 口语词频下限:只抬已有候选词的 p;表外新词走 new_words（需要显式读音）。
+    if args.colloquial_freq:
+        raised = 0
+        for line in open(args.colloquial_freq, encoding="utf-8"):
+            if not line.strip() or line.startswith("#"):
+                continue
+            w, f = line.rstrip("\n").split("\t")[:2]
+            if w in candidates:
+                before = p.get(w, 0.0)
+                p[w] = max(before, int(f) / SCALE)
+                raised += p[w] != before
+        print(f"[colloquial] raised={raised}", flush=True)
     # 网页语料里垃圾站的刷词清不干净：词表收录的词频封顶（别压过 自卫），别的直接不收。
     with open(args.blocked, encoding="utf-8") as f:
         spam = re.compile("|".join(w for line in f if not line.startswith("#") for w in line.split()))
