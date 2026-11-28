@@ -49,7 +49,8 @@ def corpus_args(readings: str) -> str:
     return (f"--stats {stats} --dev {CACHE}/sampled.jsonl.gz --exclude {find('eval-shared-v1.tsv')} "
             f"--readings {readings} --cache {CACHE} "
             f"--new-words ../wordlists/new_words.tsv --colloquial ../wordlists/colloquial.tsv "
-            f"--blocked ../wordlists/blocked.txt")
+            f"--blocked ../wordlists/blocked.txt "
+            f"--spike-scheme pow --colloquial-freq ../wordlists/colloquial_freq.tsv")
 
 
 def scan() -> None:
