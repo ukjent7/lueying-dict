@@ -424,6 +424,12 @@ def main() -> int:
                         help="soft 的线性保留率 / pow 的指数")
     parser.add_argument("--colloquial-freq", default="",
                         help="口语词频下限表（词\\t每十亿次计数），词频低于下限的抬到下限")
+    parser.add_argument("--lex-floor", type=int, default=0,
+                        help="词表验证词的词频下限(每十亿次计数),只抬 need=1 的词;"
+                             "取 new_words 同口径的保守先验(100~300)")
+    parser.add_argument("--trusted-redundant", type=float, default=0.0,
+                        help="词表验证词的冗余折扣;>0 时替代 --redundant 用于可信词"
+                             "(0.05 的池内冗余判定对在发货词典里拼不出的词过于激进)")
     parser.add_argument("--out", default="output")
     args = parser.parse_args()
     os.makedirs(args.out, exist_ok=True)
@@ -432,7 +438,8 @@ def main() -> int:
     official = load_8105(f"{cache}/8105.txt")
     pinyin_data = load_pinyin_data(f"{cache}/pinyin-data.txt")
     phrases = load_phrases(f"{cache}/phrase-pinyin.txt")
-    common = set(phrases) | load_cedict(f"{cache}/cedict.gz", phrases) | load_seeds(args.seeds)
+    common_cedict = load_cedict(f"{cache}/cedict.gz", phrases)
+    common = set(phrases) | common_cedict | load_seeds(args.seeds)
     new_words = {row[0]: row for row in load_tsv(args.new_words)}
     print(f"[load] official={len(official)} pinyin_data={len(pinyin_data)} phrases={len(phrases)} "
           f"common={len(common)} new={len(new_words)}", flush=True)
@@ -538,7 +545,19 @@ def main() -> int:
     # 两家社区词库都收、又拼不出来的词（首过效应）语料次数少，靠效用排不进去，但它们最需要收录。
     # 只认两家共有的词：单家词里混着大量碎片，加权后词形覆盖反而下降。--seeds 第一个是万象，其余是白霜。
     agreed = load_seeds(args.seeds[:1]) & load_seeds(args.seeds[1:])
-    utility = {w: p[w] * (need[w] or args.redundant)
+    # 词表保底:两家词库共有、或 CC-CEDICT/phrase-pinyin 收录,都算人工验证过的真词。
+    # 零语料证据的真词 p≈0,效用再乘 TRUSTED/UNSOLVED 也排不进档位(黎曼猜想);
+    # 给 need=1 的词一个保守词频下限,让它们进得了候选、压得过同键碎切。
+    trusted = agreed | common_cedict | set(phrases)
+    if args.lex_floor:
+        floor_p = args.lex_floor / SCALE
+        raised = [w for w in candidates if w in trusted and need[w] and p.get(w, 0.0) < floor_p]
+        for w in raised:
+            p[w] = floor_p
+        print(f"[lexfloor] raised={len(raised)}", flush=True)
+    red = {w: (args.trusted_redundant or args.redundant) if w in trusted else args.redundant
+           for w in candidates}
+    utility = {w: p[w] * (need[w] or red[w])
                * ((TRUSTED * (args.unsolved if need[w] and w in agreed else 1.0))
                   if w in common else 1.0)
                for w in candidates}

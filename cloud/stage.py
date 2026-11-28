@@ -50,7 +50,7 @@ def corpus_args(readings: str) -> str:
             f"--readings {readings} --cache {CACHE} "
             f"--new-words ../wordlists/new_words.tsv --colloquial ../wordlists/colloquial.tsv "
             f"--blocked ../wordlists/blocked.txt "
-            f"--spike-scheme pow --colloquial-freq ../wordlists/colloquial_freq.tsv")
+            f"--spike-scheme pow --colloquial-freq ../wordlists/colloquial_freq.tsv --lex-floor 300 --trusted-redundant 0.3")
 
 
 def scan() -> None:
